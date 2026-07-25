@@ -1134,11 +1134,10 @@ impl MouseEventAction {
                         if let ContentMode::TabCompletionAskForFlycomp {
                             command_word,
                             word_under_cursor,
-                            sandbox,
                             ..
                         } = mode
                         {
-                            app.run_flycomp(command_word, word_under_cursor, sandbox.is_some());
+                            app.run_flycomp(command_word, word_under_cursor);
                         }
                         MouseActionOutput::update_now()
                     } else {
@@ -1173,7 +1172,7 @@ impl MouseEventAction {
                     if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
                         let mode = std::mem::replace(&mut app.content_mode, ContentMode::Normal);
                         if let ContentMode::TabCompletionAskForFlycomp { command_word, .. } = mode {
-                            app.settings.flycomp_blacklist.insert(command_word);
+                            app.settings.flycomp.add_to_blacklist(command_word);
                         }
                         MouseActionOutput::update_now()
                     } else {
