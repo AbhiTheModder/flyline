@@ -11,8 +11,6 @@ use libc::c_int;
 use lscolors::LsColors;
 use std::collections::HashMap;
 #[cfg(not(test))]
-use std::collections::HashSet;
-#[cfg(not(test))]
 use std::io::Read;
 #[cfg(not(test))]
 use std::os::unix::fs::PermissionsExt;
@@ -24,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 #[cfg(not(test))]
 use std::time::SystemTime;
+#[cfg(not(test))]
+use std::collections::HashSet;
 
 #[cfg(not(test))]
 fn with_redirected_stdout<F, R>(func: F) -> (R, String)
@@ -1641,7 +1641,7 @@ pub fn find_quote_type(s: &str) -> Option<QuoteType> {
 }
 
 // ---------------------------------------------------------------------------
-// Cached environment lookups (moved from BashEnvManager)
+// Cached environment lookups
 // ---------------------------------------------------------------------------
 
 static DEFINED_ALIASES: Mutex<Option<Vec<CommandWordInfo>>> = Mutex::new(None);
@@ -1775,39 +1775,55 @@ impl ExecutablesOnPath {
 
     /// Update the cache in-place: evict removed PATH dirs, add new ones, and
     /// re-scan any directory whose mtime has changed.
-    fn update_cache(&mut self) {
+    ///
+    /// This is pure file system stuff and should never require BASH_LOCK.
+    fn update_cache(path_env: Option<String>) {
         let _timer = crate::perf::PerfTimer::start_and_log_on_drop("update_path_cache");
-        let current_dirs: Vec<PathBuf> = get_envvar_value("PATH")
+        let current_dirs: Vec<PathBuf> = path_env
             .map(|p| p.split(':').map(PathBuf::from).collect())
             .unwrap_or_default();
 
         let current_dir_set: HashSet<&PathBuf> = current_dirs.iter().collect();
 
         // Evict directories that are no longer on PATH.
-        self.cache.retain(|dir, _| current_dir_set.contains(dir));
+        EXECUTABLES_ON_PATH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cache
+            .retain(|dir, _| current_dir_set.contains(dir));
 
         // Refresh (or populate) each directory that is currently on PATH.
-        for dir in &current_dirs {
+        for dir in current_dirs {
             let current_mtime = dir.metadata().ok().and_then(|m| m.modified().ok());
 
-            match self.cache.get(dir) {
-                Some(entry) if entry.mtime == current_mtime => {
-                    continue;
+            let needs_update = {
+                let guard = EXECUTABLES_ON_PATH
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                match guard.cache.get(&dir) {
+                    Some(entry) if entry.mtime == current_mtime => false,
+                    _ => true,
                 }
-                _ => {
-                    let names = if current_mtime.is_some() {
-                        Self::scan_dir(dir)
-                    } else {
-                        Vec::new()
-                    };
-                    self.cache.insert(
-                        dir.clone(),
+            };
+
+            if needs_update {
+                let names = if current_mtime.is_some() {
+                    Self::scan_dir(&dir)
+                } else {
+                    Vec::new()
+                };
+
+                EXECUTABLES_ON_PATH
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cache
+                    .insert(
+                        dir,
                         DirExecutables {
                             mtime: current_mtime,
                             names,
                         },
                     );
-                }
             }
         }
     }
@@ -1860,10 +1876,14 @@ pub fn get_possible_command_words() -> impl Iterator<Item = CommandWordInfo> {
     let reserved_words = get_cached_reserved_words();
     let shell_functions = get_cached_shell_functions();
     let builtins = get_cached_builtins();
-    let mut exe_guard = EXECUTABLES_ON_PATH.lock().unwrap();
-    exe_guard.update_cache();
-    let executables: Vec<CommandWordInfo> = exe_guard.iter_info().collect();
-    drop(exe_guard);
+    // This should be pre warmed by warm_completion_caches
+    // We don't update the executables cache here to avoid hitting the filesystem
+    // when we are just tab completing
+    let executables: Vec<CommandWordInfo> = EXECUTABLES_ON_PATH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter_info()
+        .collect();
 
     aliases
         .into_iter()
@@ -1884,19 +1904,24 @@ pub fn get_possible_command_words() -> impl Iterator<Item = CommandWordInfo> {
 }
 
 #[cfg(not(test))]
-pub fn warm_completion_caches() {
+pub fn warm_bash_caches() {
     let _guard = crate::bash_symbols::BASH_LOCK.lock();
     let _ = get_cached_aliases();
     let _ = get_cached_reserved_words();
     let _ = get_cached_shell_functions();
     let _ = get_cached_builtins();
-    if let Ok(mut exe_guard) = EXECUTABLES_ON_PATH.lock() {
-        exe_guard.update_cache();
-    }
 }
 
 #[cfg(test)]
-pub fn warm_completion_caches() {}
+pub fn warm_bash_caches() {}
+
+#[cfg(not(test))]
+pub fn warm_path_cache(path_env: Option<String>) {
+    ExecutablesOnPath::update_cache(path_env);
+}
+
+#[cfg(test)]
+pub fn warm_path_cache(_path_env: Option<String>) {}
 
 #[cfg(not(test))]
 pub fn read_terminating_signal() -> c_int {
