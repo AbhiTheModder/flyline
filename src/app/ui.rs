@@ -60,10 +60,9 @@ impl DrawnContent {
             direct_tag,
             Tag::Blank
                 | Tag::Normal
-                | Tag::Ps1Prompt
-                | Tag::Ps1PromptDynamicTime
-                | Tag::Ps1PromptAnimation
-                | Tag::Ps2Prompt
+                | Tag::Prompt
+                | Tag::PromptDynamicTime
+                | Tag::PromptAnimation
                 | Tag::TabSuggestion
                 | Tag::HistorySuggestion
                 | Tag::FuzzySearch
@@ -606,7 +605,7 @@ impl<'a> App<'a> {
         {
             for line in &mut lprompt {
                 for span in &mut line.spans {
-                    if span.tag == SpanTag::Constant(Tag::Ps1PromptCwdWidget(cwd_index)) {
+                    if span.tag == SpanTag::Constant(Tag::PromptCwdWidget(cwd_index)) {
                         span.span.style = Palette::convert_to_highlighted(span.span.style);
                     }
                 }
@@ -615,14 +614,14 @@ impl<'a> App<'a> {
 
         // Apply hover/depress styling to whichever CWD segment the mouse is over.
         if self.mode.is_running()
-            && let Some(Tag::Ps1PromptCwdWidget(hovered_idx)) =
+            && let Some(Tag::PromptCwdWidget(hovered_idx)) =
                 self.mouse_state.last_mouse_over_cell_semantic
         {
-            let cwd_state = self.button_state_for(Tag::Ps1PromptCwdWidget(hovered_idx));
+            let cwd_state = self.button_state_for(Tag::PromptCwdWidget(hovered_idx));
             if !matches!(cwd_state, ButtonState::Normal) {
                 for line in &mut lprompt {
                     for span in &mut line.spans {
-                        if span.tag == SpanTag::Constant(Tag::Ps1PromptCwdWidget(hovered_idx)) {
+                        if span.tag == SpanTag::Constant(Tag::PromptCwdWidget(hovered_idx)) {
                             span.span.style =
                                 Palette::apply_button_style(span.span.style, cwd_state);
                         }
@@ -639,7 +638,7 @@ impl<'a> App<'a> {
             if is_last {
                 content.write_tagged_line_lrjustified(
                     tagged_l,
-                    &TaggedLine::from_line(Line::from(" "), Tag::Ps1Prompt),
+                    &TaggedLine::from_line(Line::from(" "), Tag::Prompt),
                     tagged_r,
                     true,
                 );
@@ -703,13 +702,14 @@ impl<'a> App<'a> {
             if part.token.token.kind == TokenKind::Newline {
                 line_idx += 1;
                 content.newline();
-                let line_num_str = format!("{}", line_idx + 1);
-                let padded_line_num = format!("{:>width$}", line_num_str, width = max_digits);
-                let ps2 = Span::styled(
-                    format!("{}∙", padded_line_num),
-                    self.settings.colour_palette.secondary_text(),
+                let ps2_spans = self.prompt_manager.get_ps2(
+                    line_idx + 1,
+                    max_digits,
+                    self.settings.show_animations,
                 );
-                content.write_tagged_span(&TaggedSpan::new(ps2, Tag::Ps2Prompt));
+                for span in ps2_spans {
+                    content.write_tagged_span(&span);
+                }
             }
         }
         if self.formatted_buffer_cache.draw_cursor_at_end {
