@@ -491,6 +491,15 @@ flyline set-cursor --help
 ```
 
 # Terminal emulator notes
+
+Flyline makes use modern terminal features / escape codes.
+I'd recommend a feature complete terminal emulator like Ghostty or Kitty.
+You can check https://vtdn.dev/ to see what features your terminal emulator / multiplexer supports.
+
+## Ghostty
+I recommend setting `cursor-click-to-move = false`.
+When this is `true`, incorrect mouse events are sent to flyline. 
+
 ## Kitty:
 When running inside Kitty, it is highly recommended to use the terminal cursor backend:
 ```bash
