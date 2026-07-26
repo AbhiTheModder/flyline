@@ -537,14 +537,32 @@ pub static DEFAULT_MOUSE_BINDINGS: LazyLock<Vec<MouseBinding>> = LazyLock::new(|
             action: MouseEventAction::HoverSuggestion,
         },
         MouseBinding {
+            context: MouseContextVar::TabCompletion
+                + MouseContextVar::DragLeft
+                + MouseContextVar::OverCellSemantically(TagPattern::Suggestion),
+            action: MouseEventAction::HoverSuggestion,
+        },
+        MouseBinding {
             context: MouseContextVar::FuzzyHistorySearch
                 + MouseContextVar::Moved
                 + MouseContextVar::OverCellSemantically(TagPattern::HistoryResult),
             action: MouseEventAction::HoverHistoryResult,
         },
         MouseBinding {
+            context: MouseContextVar::FuzzyHistorySearch
+                + MouseContextVar::DragLeft
+                + MouseContextVar::OverCellSemantically(TagPattern::HistoryResult),
+            action: MouseEventAction::HoverHistoryResult,
+        },
+        MouseBinding {
             context: MouseContextVar::AgentOutputSelection
                 + MouseContextVar::Moved
+                + MouseContextVar::OverCellSemantically(TagPattern::AiResult),
+            action: MouseEventAction::HoverAiResult,
+        },
+        MouseBinding {
+            context: MouseContextVar::AgentOutputSelection
+                + MouseContextVar::DragLeft
                 + MouseContextVar::OverCellSemantically(TagPattern::AiResult),
             action: MouseEventAction::HoverAiResult,
         },
