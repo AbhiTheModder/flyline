@@ -741,6 +741,65 @@ flyline create-prompt-widget leader-mode --name FLYLINE_LEADER_MODE 'LEADER' ''
 export RPS1='FLYLINE_LEADER_MODE'
 ```
 
+# Integration with third party apps
+> [!CAUTION]
+> This an experimental feature and might change. Feedback welcome
+
+Flyline completely replaces readline so other TUIs that help you write commands don't work immediately.
+
+Flyline has a special action that will:
+- pause flyline then
+- run your program then
+- wait for it to finish (keyboard / mouse are handled by your program) then
+- flyline resumes and update the buffer based on `READLINE_LINE`, `READLINE_POINT`, and `READLINE_MARK`.
+
+## Atuin
+```bash
+eval "$(atuin init bash)"
+flyline key bind Ctrl+r 'always=runBashCommand(__atuin_widget_run)+submitOrNewline' 
+flyline key bind Up 'editingBufferMode+cursorOnFirstLine=runBashCommand("__atuin_history --shell-up-key-binding --keymap-mode=emacs")+submitOrNewline'
+flyline key bind Ctrl+b 'editingBufferMode+bufferIsEmpty=runBashCommand(_atuin_ai_question_mark)'
+```
+
+## fzf
+```bash
+eval "$(fzf --bash)"
+
+flyline_fzf_cd() {
+    local cmd
+    cmd=$(__fzf_cd__) && READLINE_LINE="$cmd" READLINE_POINT=${#cmd}
+}
+
+flyline key bind Ctrl+r 'always=runBashCommand(__fzf_history__)' # or runBashCommand(__fzf_history__)+submitOrNewline
+flyline key bind Ctrl+t 'always=runBashCommand(fzf-file-widget)'
+flyline key bind Alt+c  'always=runBashCommand(flyline_fzf_cd)+submitOrNewline'
+```
+
+## Custom
+
+```bash
+# 1. Define the function
+my_custom_function() {
+    local line="$READLINE_LINE"
+    local point="${READLINE_POINT:-0}"
+    local mark="${READLINE_MARK:-0}"
+
+    local start=$(( point < mark ? point : mark ))
+    local end=$(( point > mark ? point : mark ))
+    local len=$(( end - start ))
+
+    local selected="${line:start:len}"
+    local prefix="this part was selected: "
+
+    READLINE_LINE="${prefix}${selected}"
+    READLINE_MARK=${#prefix}
+    READLINE_POINT=$(( ${#prefix}  + ${#selected}  ))
+}
+
+# 2. Bind it to a key combination (e.g., Ctrl+b)
+flyline key bind Ctrl+b 'always=runBashCommand(my_custom_function)'
+```
+
 # Licensing
 
 This project is multi-licensed:

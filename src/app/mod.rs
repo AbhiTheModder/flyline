@@ -68,11 +68,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Frame rate (fps) used when the user has been idle for longer than [`IDLE_TIMEOUT`].
 const IDLE_FRAME_RATE: f64 = 0.2;
 
-fn restore_terminal(extended_key_codes: bool) {
-    crossterm::terminal::disable_raw_mode().unwrap_or_else(|e| {
-        // Likely from the master pty fd being closed.
-        log::error!("Failed to disable raw mode: {}", e);
-    });
+fn restore_terminal() {
     crossterm::execute!(
         std::io::stdout(),
         crossterm::event::DisableBracketedPaste,
@@ -80,25 +76,51 @@ fn restore_terminal(extended_key_codes: bool) {
         crossterm::event::DisableMouseCapture,
         XtShiftEscape::Disable,
         PointerShape::Default,
+        crossterm::event::PopKeyboardEnhancementFlags,
     )
     .unwrap_or_else(|e| {
         log::error!("Failed to restore terminal features: {}", e);
     });
-    if extended_key_codes {
-        crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::PopKeyboardEnhancementFlags
-        )
-        .unwrap_or_else(|e| {
-            log::error!("Failed to pop keyboard enhancement flags: {}", e);
-        });
-    }
+    let mut stdout = std::io::stdout();
+    let _ = std::io::Write::flush(&mut stdout);
+    crossterm::terminal::disable_raw_mode().unwrap_or_else(|e| {
+        // Likely from the master pty fd being closed.
+        log::error!("Failed to disable raw mode: {}", e);
+    });
 }
 
-fn set_panic_hook(extended_key_codes: bool) {
+// Set up terminal features. Mouse capture is handled separately inside
+// MouseState::initialize (called in App::new) based on the configured mode.
+fn configure_terminal(extended_key_codes: bool) {
+    let mut stdout = std::io::stdout();
+    let _ = std::io::Write::flush(&mut stdout);
+    crossterm::terminal::enable_raw_mode().unwrap_or_else(|e| {
+        log::error!("Failed to enable raw mode: {}", e);
+    });
+    let flags = if extended_key_codes {
+        // Enabling REPORT_ALL_KEYS_AS_ESCAPE_CODES causes Ctrl+C to not copy to clipboard in VS Code with default settings
+        // because it causes the press of Ctrl to be sent as a key code thus clearing the selection before 'c' is pressed.
+        // https://blog.fsck.com/releases/2026/02/26/terminal-keyboard-protocol/ is a good reference for understanding the terminal key code problem.
+        crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+    } else {
+        crossterm::event::KeyboardEnhancementFlags::empty()
+    };
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableFocusChange,
+        crossterm::event::PushKeyboardEnhancementFlags(flags),
+    )
+    .unwrap_or_else(|e| {
+        log::error!("Failed to set terminal features: {}", e);
+    });
+}
+
+fn set_panic_hook() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal(extended_key_codes);
+        restore_terminal();
         log::error!("Panic: {}", info);
         hook(info);
     }));
@@ -208,44 +230,13 @@ pub fn get_command(settings: &mut Settings) -> ExitState {
         return ExitState::EOF;
     }
 
-    let extended_key_codes = settings.enable_extended_key_codes;
-    set_panic_hook(extended_key_codes);
-
-    let mut stdout = std::io::stdout();
-    std::io::Write::flush(&mut stdout).unwrap();
-    crossterm::terminal::enable_raw_mode().unwrap();
-
-    // Set up terminal features. Mouse capture is handled separately inside
-    // MouseState::initialize (called in App::new) based on the configured mode.
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::EnableBracketedPaste,
-        crossterm::event::EnableFocusChange,
-    )
-    .unwrap_or_else(|e| {
-        log::error!("Failed to set terminal features: {}", e);
-    });
-    if extended_key_codes {
-        // Enabling REPORT_ALL_KEYS_AS_ESCAPE_CODES causes Ctrl+C to not copy to clipboard in VS Code with default settings
-        // because it causes the press of Ctrl to be sent as a key code thus clearing the selection before 'c' is pressed.
-        // https://blog.fsck.com/releases/2026/02/26/terminal-keyboard-protocol/ is a good reference for understanding the terminal key code problem.
-        crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-            )
-        )
-        .unwrap_or_else(|e| {
-            log::error!("Failed to push keyboard enhancement flags: {}", e);
-        });
-    }
+    set_panic_hook();
 
     let app = time_it!("startup: app creation", App::new(settings));
 
     let end_state = app.run();
 
-    restore_terminal(extended_key_codes);
+    restore_terminal();
 
     log::debug!("Final state: {:?}", end_state);
     end_state
@@ -390,6 +381,7 @@ pub(crate) struct App<'a> {
     /// Timestamp of the last draw operation.
     pub(super) last_draw_time: std::time::Instant,
     pub(super) needs_screen_cleared: bool,
+    pub(super) needs_full_redraw: bool,
     /// Last key event, context expression, and action dispatched.
     pub(super) last_key: Option<LastKeyPress>,
     /// Last mouse event received.
@@ -474,6 +466,7 @@ impl<'a> App<'a> {
             settings,
             last_draw_time: std::time::Instant::now(),
             needs_screen_cleared: false,
+            needs_full_redraw: false,
             last_key: None,
             last_mouse: None,
             last_processed_key_sequence: 0,
@@ -546,7 +539,7 @@ impl<'a> App<'a> {
         });
 
         let mut terminal = time_it!("startup: terminal setup", {
-            crossterm::terminal::enable_raw_mode().unwrap();
+            configure_terminal(self.settings.enable_extended_key_codes);
 
             let terminal = match ratatui::Terminal::with_options(
                 ratatui::backend::CrosstermBackend::new(std::io::stdout()),
@@ -614,6 +607,12 @@ impl<'a> App<'a> {
             }
 
             if redraw {
+                if self.needs_full_redraw {
+                    if let Err(e) = terminal.resize(last_terminal_size.into()) {
+                        log::error!("Failed to resync inline viewport after bash command: {}", e);
+                    }
+                }
+
                 let frame_area = terminal.get_frame().area();
 
                 let content =
@@ -622,6 +621,11 @@ impl<'a> App<'a> {
                 let desired_height = if self.needs_screen_cleared {
                     self.needs_screen_cleared = false;
                     last_terminal_size.height
+                } else if self.needs_full_redraw {
+                    last_terminal_size
+                        .height
+                        .saturating_sub(frame_area.y)
+                        .max(content.height())
                 } else {
                     content.height().min(last_terminal_size.height)
                 };
@@ -801,6 +805,90 @@ impl<'a> App<'a> {
             self.mouse_state.last_mouse_over_cell_semantic = None;
             self.mouse_state.last_mouse_over_cell_direct = None;
         }
+    }
+
+    /// This is meant to mimic bash_execute_unix_command from bashline.c
+    pub(crate) fn run_bash_command(&mut self, cmd: &str) {
+        let extended_key_codes = self.settings.enable_extended_key_codes;
+        let mouse_enabled = self.mouse_state.is_enabled();
+
+        // 1. Export READLINE_* variables before running command
+        let selection_was_active = self.buffer.selection_byte().is_some();
+        let initial_mark_char_offset = self
+            .buffer
+            .selection_char_offset()
+            .unwrap_or_else(|| self.buffer.cursor_char_offset());
+
+        let current_line = self.buffer.buffer().to_string();
+        let current_point = self.buffer.cursor_char_offset().to_string();
+        let current_mark = initial_mark_char_offset.to_string();
+
+        let _ = crate::bash_funcs::export_env_var("READLINE_LINE", &current_line);
+        let _ = crate::bash_funcs::export_env_var("READLINE_POINT", &current_point);
+        let _ = crate::bash_funcs::export_env_var("READLINE_MARK", &current_mark);
+        let _ = crate::bash_funcs::export_env_var("READLINE_ARGUMENT", "1");
+
+        // 2. Put terminal back into normal mode
+        restore_terminal();
+        // move cursor to column 0 (matching Readline's rl_clear_visible_line)
+        let mut stdout = std::io::stdout();
+        let _ = crossterm::execute!(stdout, crossterm::cursor::MoveToColumn(0));
+        let _ = std::io::Write::flush(&mut stdout);
+
+        // 3. Execute command using bash FFI function
+        if let Err(e) = crate::bash_funcs::evaluate_shell_string(cmd) {
+            log::error!("Failed to execute bash command '{}': {}", cmd, e);
+        }
+
+        // 4. Restore terminal back to the mode it was already in
+        configure_terminal(extended_key_codes);
+        if mouse_enabled {
+            self.mouse_state.enable();
+        }
+
+        // 5. Read READLINE_* env vars and set text buffer, cursor, and mark positions
+        if let Some(new_line) = crate::bash_funcs::get_envvar_value("READLINE_LINE") {
+            let cleaned_line = new_line.trim_end_matches(['\r', '\n']);
+            self.buffer.replace_buffer(cleaned_line);
+        }
+
+        let new_point_char_offset =
+            if let Some(new_point_str) = crate::bash_funcs::get_envvar_value("READLINE_POINT") {
+                if let Ok(new_point) = new_point_str.parse::<usize>() {
+                    let byte_pos = self.buffer.char_to_byte_offset(new_point);
+                    self.buffer.try_move_cursor_to_byte_pos(byte_pos, true);
+                    new_point
+                } else {
+                    self.buffer.cursor_char_offset()
+                }
+            } else {
+                self.buffer.cursor_char_offset()
+            };
+
+        if let Some(new_mark_str) = crate::bash_funcs::get_envvar_value("READLINE_MARK") {
+            if let Ok(new_mark_char_offset) = new_mark_str.parse::<usize>() {
+                if new_mark_char_offset != new_point_char_offset
+                    && (selection_was_active || new_mark_char_offset != initial_mark_char_offset)
+                {
+                    let byte_pos = self.buffer.char_to_byte_offset(new_mark_char_offset);
+                    self.buffer.set_selection_anchor(byte_pos);
+                } else {
+                    self.buffer.clear_selection();
+                }
+            } else {
+                self.buffer.clear_selection();
+            }
+        } else {
+            self.buffer.clear_selection();
+        }
+
+        // 6. Unset READLINE_* variables (matching GNU Readline unbind_readline_variables)
+        let _ = crate::bash_funcs::unset_env_var("READLINE_LINE");
+        let _ = crate::bash_funcs::unset_env_var("READLINE_POINT");
+        let _ = crate::bash_funcs::unset_env_var("READLINE_MARK");
+        let _ = crate::bash_funcs::unset_env_var("READLINE_ARGUMENT");
+
+        self.needs_full_redraw = true;
     }
 
     /// Compute the [`ButtonState`] of an interactive cell with the given `tag`,

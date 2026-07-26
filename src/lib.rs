@@ -210,6 +210,7 @@ impl Flyline {
                             self.settings.run_tutorial = false;
                         }
                     }
+
                     cmd.into_bytes()
                 }
                 app::ExitState::EOF => {
