@@ -1306,66 +1306,70 @@ impl Flyline {
                         }
                     }
                     None => {}
-                    Some(Commands::Log { subcommand }) => {
-                        match subcommand {
-                            LogSubcommands::Dump { last } => {
-                                match crate::logging::get_filtered_logs(last.as_deref()) {
-                                    Ok(entries) => {
-                                        use std::io::Write;
-                                        let stdout = std::io::stdout();
-                                        let mut out = stdout.lock();
-                                        for entry in entries {
-                                            if let Err(e) = writeln!(out, "{}", entry) {
-                                                eprintln!("Failed to write log entry: {}", e);
-                                            }
+                    Some(Commands::Log { subcommand }) => match subcommand {
+                        LogSubcommands::Dump { last } => {
+                            match crate::logging::get_filtered_logs(last.as_deref()) {
+                                Ok(entries) => {
+                                    use std::io::Write;
+                                    let stdout = std::io::stdout();
+                                    let mut out = stdout.lock();
+                                    for entry in entries {
+                                        if let Err(e) = writeln!(out, "{}", entry) {
+                                            eprintln!("Failed to write log entry: {}", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        eprintln!("Failed to retrieve logs: {}", e);
-                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to retrieve logs: {}", e);
                                 }
                             }
-                            LogSubcommands::Copy { last } => {
-                                match crate::logging::get_filtered_logs(last.as_deref()) {
-                                    Ok(entries) => {
-                                        let len = entries.len();
-                                        let logs_to_copy = if len > 10_000 {
-                                            entries[len - 10_000..].to_vec()
-                                        } else {
-                                            entries
-                                        };
-                                        let joined_logs = logs_to_copy.join("\n");
-                                        if let Err(e) = crossterm::execute!(
-                                        std::io::stdout(),
-                                        crossterm::clipboard::CopyToClipboard::to_clipboard_from(joined_logs)
+                        }
+                        LogSubcommands::Copy { last } => {
+                            match crate::logging::get_filtered_logs(last.as_deref()) {
+                                Ok(entries) => {
+                                    let len = entries.len();
+                                    let logs_to_copy = if len > 10_000 {
+                                        entries[len - 10_000..].to_vec()
+                                    } else {
+                                        entries
+                                    };
+                                    let joined_logs = logs_to_copy.join("\n");
+                                    if let Err(e) = crate::flush_stdout!(
+                                        "{}",
+                                        termina::escape::osc::Osc::SetSelection(
+                                            termina::escape::osc::Selection::CLIPBOARD,
+                                            &joined_logs
+                                        )
                                     ) {
-                                        eprintln!("Failed to copy logs to clipboard via OSC 52: {}", e);
+                                        eprintln!(
+                                            "Failed to copy logs to clipboard via OSC 52: {}",
+                                            e
+                                        );
                                     } else {
                                         println!("Copied {} log lines!", logs_to_copy.len());
                                     }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to retrieve logs: {}", e);
-                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to retrieve logs: {}", e);
                                 }
                             }
-                            LogSubcommands::SetLevel { level } => {
-                                let filter = log::LevelFilter::from(level);
-                                log::set_max_level(filter);
-                                log::info!("Log level set to {:?}", filter);
-                            }
-                            LogSubcommands::Stream { dest } => match logging::stream_logs(&dest) {
-                                Ok(()) => {
-                                    if dest == "terminal" {
-                                        log::info!("Log streaming to terminal");
-                                    } else {
-                                        println!("Flyline logs streaming to {}", dest);
-                                    }
-                                }
-                                Err(e) => eprintln!("Failed to stream logs: {}", e),
-                            },
                         }
-                    }
+                        LogSubcommands::SetLevel { level } => {
+                            let filter = log::LevelFilter::from(level);
+                            log::set_max_level(filter);
+                            log::info!("Log level set to {:?}", filter);
+                        }
+                        LogSubcommands::Stream { dest } => match logging::stream_logs(&dest) {
+                            Ok(()) => {
+                                if dest == "terminal" {
+                                    log::info!("Log streaming to terminal");
+                                } else {
+                                    println!("Flyline logs streaming to {}", dest);
+                                }
+                            }
+                            Err(e) => eprintln!("Failed to stream logs: {}", e),
+                        },
+                    },
                     Some(Commands::RunTutorial { enabled }) => {
                         let enabled = enabled.unwrap_or(true);
                         log::info!("Run tutorial set to {}", enabled);
@@ -1373,10 +1377,11 @@ impl Flyline {
                         if enabled {
                             self.settings.tutorial_step = tutorial::TutorialStep::Welcome;
                             // clear the terminal:
-                            if let Err(e) = crossterm::execute!(
-                                std::io::stdout(),
-                                crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                                crossterm::cursor::MoveTo(0, 0)
+                            use termina::escape::csi::{Csi, Cursor, Edit, EraseInDisplay};
+                            if let Err(e) = crate::flush_stdout!(
+                                "{}{}",
+                                Csi::Edit(Edit::EraseInDisplay(EraseInDisplay::EraseDisplay)),
+                                Csi::Cursor(Cursor::goto(0, 0))
                             ) {
                                 log::warn!("Failed to clear terminal: {}", e);
                             }
@@ -1937,14 +1942,27 @@ fn show_version(copy: bool) {
     println!("{}", version_text);
 
     if copy {
-        if let Err(e) = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::clipboard::CopyToClipboard::to_clipboard_from(version_text)
+        if let Err(e) = crate::flush_stdout!(
+            "{}",
+            termina::escape::osc::Osc::SetSelection(
+                termina::escape::osc::Selection::CLIPBOARD,
+                &version_text
+            )
         ) {
             log::error!("Failed to copy version text to clipboard via OSC 52: {}", e);
         }
         println!();
-        println!("\x1b[32mCopied to clipboard!\x1b[0m");
+        if !termina::style::Stylized::is_ansi_color_disabled() {
+            use termina::escape::csi::{Csi, Sgr};
+            use termina::style::ColorSpec;
+            println!(
+                "{}Copied to clipboard!{}",
+                Csi::Sgr(Sgr::Foreground(ColorSpec::GREEN)),
+                Csi::Sgr(Sgr::Reset)
+            );
+        } else {
+            println!("Copied to clipboard!");
+        }
     }
 }
 

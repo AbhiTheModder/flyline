@@ -28,8 +28,8 @@ impl PointerShape {
     }
 }
 
-impl crossterm::Command for PointerShape {
-    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+impl std::fmt::Display for PointerShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "\x1b]22;{}\x1b\\", self.to_str())
     }
 }
@@ -57,12 +57,17 @@ impl MouseState {
     /// Initialize mouse state for the given mode, immediately enabling mouse capture
     /// (via crossterm) when appropriate.
     pub fn initialize(mode: &MouseMode) -> Self {
+        use termina::escape::csi::{Csi, DecPrivateMode, DecPrivateModeCode, Mode};
+        let set_mode = |code| Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(code)));
         let enabled = match mode {
             MouseMode::Disabled => false,
             MouseMode::Simple | MouseMode::Smart => {
-                match crossterm::execute!(
-                    std::io::stdout(),
-                    crossterm::event::EnableMouseCapture,
+                match crate::flush_stdout!(
+                    "{}{}{}{}{}",
+                    set_mode(DecPrivateModeCode::MouseTracking),
+                    set_mode(DecPrivateModeCode::ButtonEventMouse),
+                    set_mode(DecPrivateModeCode::AnyEventMouse),
+                    set_mode(DecPrivateModeCode::SGRMouse),
                     XtShiftEscape::Enable
                 ) {
                     Ok(_) => {
@@ -97,9 +102,14 @@ impl MouseState {
         if self.enabled {
             return;
         }
-        match crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::EnableMouseCapture,
+        use termina::escape::csi::{Csi, DecPrivateMode, DecPrivateModeCode, Mode};
+        let set_mode = |code| Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(code)));
+        match crate::flush_stdout!(
+            "{}{}{}{}{}",
+            set_mode(DecPrivateModeCode::MouseTracking),
+            set_mode(DecPrivateModeCode::ButtonEventMouse),
+            set_mode(DecPrivateModeCode::AnyEventMouse),
+            set_mode(DecPrivateModeCode::SGRMouse),
             XtShiftEscape::Enable
         ) {
             Ok(_) => {
@@ -121,9 +131,14 @@ impl MouseState {
         self.left_button_down = false;
         // Reset pointer shape before actually disabling, so the code is written
         self.set_pointer_shape(PointerShape::Default, false);
-        match crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::DisableMouseCapture,
+        use termina::escape::csi::{Csi, DecPrivateMode, DecPrivateModeCode, Mode};
+        let reset_mode = |code| Csi::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(code)));
+        match crate::flush_stdout!(
+            "{}{}{}{}{}",
+            reset_mode(DecPrivateModeCode::SGRMouse),
+            reset_mode(DecPrivateModeCode::AnyEventMouse),
+            reset_mode(DecPrivateModeCode::ButtonEventMouse),
+            reset_mode(DecPrivateModeCode::MouseTracking),
             XtShiftEscape::Disable
         ) {
             Ok(_) => {
@@ -239,18 +254,24 @@ impl MouseState {
 
         log::trace!("pointer shape set: {:?}", shape);
 
-        let _ = crossterm::execute!(std::io::stdout(), shape);
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "{}", shape).and_then(|_| stdout.flush());
     }
 }
 
 impl Drop for MouseState {
     fn drop(&mut self) {
         if self.enabled {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = write!(
+                stdout,
+                "{}{}",
                 PointerShape::Default,
                 XtShiftEscape::Disable
-            );
+            )
+            .and_then(|_| stdout.flush());
         }
     }
 }
@@ -261,8 +282,8 @@ pub enum XtShiftEscape {
     Disable,
 }
 
-impl crossterm::Command for XtShiftEscape {
-    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+impl std::fmt::Display for XtShiftEscape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             XtShiftEscape::Enable => write!(f, "\x1b[>1s"),
             XtShiftEscape::Disable => write!(f, "\x1b[>0s"),
