@@ -27,6 +27,9 @@ pub enum RightClickCopyTarget {
     Buffer(String),
     HistoryEntry(String),
     Cwd(String),
+    Suggestion(String),
+    AiResult(String),
+    Clipboard(String),
 }
 
 use crate::active_suggestions::{ActiveSuggestions, ActiveSuggestionsBuilder, COLUMN_PADDING};
@@ -221,15 +224,10 @@ pub fn get_command(settings: &mut Settings) -> ExitState {
     end_state
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FuzzyHistorySource {
     PastCommands,
-    // CancelledCommands / AgentPrompts are not currently constructed (the
-    // entry points that would do so are gated behind TODOs about UX). Allow
-    // dead_code so the supporting machinery elsewhere is preserved for when
-    // those entry points are wired up.
     CancelledCommands,
-    #[allow(dead_code)]
     AgentPrompts,
 }
 
@@ -692,6 +690,7 @@ impl<'a> App<'a> {
                         self.mode = AppRunningState::Exiting(ExitState::WithoutCommand);
                     }
                 }
+                self.reevaluate_pointer_shape();
             }
 
             if !self.mode.is_running() {
@@ -944,6 +943,7 @@ impl<'a> App<'a> {
             matches: Vec::new(),
             time: now,
         });
+        self.mouse_state.last_mouse_pos = Some((mouse.column, mouse.row));
 
         // 1. Resolve tags
         let (direct_tag, mut semantic_tag) = self
@@ -1010,35 +1010,22 @@ impl<'a> App<'a> {
 
         let mut matches = Vec::new();
         let mut matched_any = false;
-        let mut has_executed_non_pointer = false;
         for binding in crate::app::actions::mouse::DEFAULT_MOUSE_BINDINGS.iter() {
             if binding.context.evaluate_direct(self) {
-                let is_pointer_action = matches!(
-                    binding.action,
-                    crate::app::actions::mouse::MouseEventAction::SetPointer(_)
-                );
-                if has_executed_non_pointer && !is_pointer_action {
-                    continue;
-                }
-                log::trace!("Matched mouse action: {:?}", binding.action);
-                matches.push((binding.context.display(), format!("{:?}", binding.action)));
+                log::trace!("Matched mouse actions: {:?}", binding.actions);
+                matches.push((binding.context.display(), format!("{:?}", binding.actions)));
 
-                let output = binding.action.run(self, mouse);
-                combined_output.merge(output);
-                matched_any = true;
-                if !is_pointer_action {
-                    has_executed_non_pointer = true;
+                for action in &binding.actions {
+                    let output = action.run(self, mouse);
+                    combined_output.merge(output);
+                    matched_any = true;
                 }
+                break;
             }
         }
 
         let mut redraw = false;
         if matched_any {
-            if let Some(shape) = combined_output.desired_pointer_shape {
-                let is_click_event =
-                    matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_));
-                self.mouse_state.set_pointer_shape(shape, is_click_event);
-            }
             if combined_output.possible_buffer_change {
                 self.on_possible_buffer_change();
             }
@@ -1083,6 +1070,47 @@ impl<'a> App<'a> {
         }
 
         redraw
+    }
+
+    pub fn reevaluate_pointer_shape(&mut self) {
+        if self.settings.mouse_mode == settings::MouseMode::Disabled {
+            self.mouse_state
+                .set_pointer_shape(crate::mouse_state::PointerShape::Default, false);
+            return;
+        }
+
+        let (col, row) = match self.mouse_state.last_mouse_pos {
+            Some(pos) => pos,
+            None => return,
+        };
+
+        let (direct_tag, semantic_tag) = self
+            .last_contents
+            .as_ref()
+            .and_then(|drawn_contents| drawn_contents.get_tagged_cell(col, row))
+            .map(|(direct, semantic)| (Some(direct), Some(semantic)))
+            .unwrap_or((None, None));
+
+        self.mouse_state.last_mouse_over_cell_semantic = semantic_tag;
+        self.mouse_state.last_mouse_over_cell_direct = direct_tag;
+
+        for binding in crate::app::actions::mouse::DEFAULT_POINTER_SHAPE_BINDINGS.iter() {
+            if binding.context.evaluate_direct(self) {
+                for action in &binding.actions {
+                    if let crate::app::actions::mouse::MouseEventAction::SetPointer(shape) = action
+                    {
+                        let is_click_event = self.last_mouse.as_ref().is_some_and(|m| {
+                            matches!(
+                                m.mouse.kind,
+                                MouseEventKind::Down(_) | MouseEventKind::Up(_)
+                            )
+                        });
+                        self.mouse_state.set_pointer_shape(*shape, is_click_event);
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     fn copy_to_clipboard(&self, text: &[u8]) -> bool {

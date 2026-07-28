@@ -46,6 +46,8 @@ pub enum KeyEventAction {
     AgentOutputSelectFirstEntry,
     #[strum(message = "Start agent mode with the current buffer again")]
     AgentOutputRunAgentMode,
+    #[strum(message = "Deselect the currently selected agent output entry")]
+    AgentOutputDeselectEntry,
     #[strum(message = "Move up in tab completion suggestions")]
     TabCompletionMoveUp,
     #[strum(message = "Move down in tab completion suggestions")]
@@ -187,7 +189,7 @@ pub enum KeyEventAction {
     #[strum(message = "Move one word part right, extending the text selection")]
     MoveRightOneWordPartExtendSelection,
     #[strum(message = "Copy the current text selection to the system clipboard via OSC 52")]
-    CopySelectionOsc52,
+    CopyTarget,
     #[strum(
         message = "Cut the current text selection: copy it to the clipboard via OSC 52 and delete it from the buffer"
     )]
@@ -294,6 +296,11 @@ impl KeyEventAction {
             KeyEventAction::AgentOutputSelectFirstEntry => {
                 if let ContentMode::AgentOutputSelection(selection) = &mut app.content_mode {
                     selection.set_selected_by_idx(0);
+                }
+            }
+            KeyEventAction::AgentOutputDeselectEntry => {
+                if let ContentMode::AgentOutputSelection(selection) = &mut app.content_mode {
+                    selection.deselect();
                 }
             }
             KeyEventAction::AgentOutputRunAgentMode => {
@@ -721,7 +728,7 @@ impl KeyEventAction {
                 app.buffer.start_selection_if_none();
                 app.buffer.move_one_word_right_fine_grained();
             }
-            KeyEventAction::CopySelectionOsc52 => {
+            KeyEventAction::CopyTarget => {
                 let text_to_copy = if app.right_click_popup_pos.is_some() {
                     app.right_click_copy_target
                         .as_ref()
@@ -730,6 +737,9 @@ impl KeyEventAction {
                             crate::app::RightClickCopyTarget::Buffer(s) => s.clone(),
                             crate::app::RightClickCopyTarget::HistoryEntry(s) => s.clone(),
                             crate::app::RightClickCopyTarget::Cwd(s) => s.clone(),
+                            crate::app::RightClickCopyTarget::Suggestion(s) => s.clone(),
+                            crate::app::RightClickCopyTarget::AiResult(s) => s.clone(),
+                            crate::app::RightClickCopyTarget::Clipboard(s) => s.clone(),
                         })
                 } else {
                     app.buffer.selected_text()
@@ -755,21 +765,19 @@ impl KeyEventAction {
                 app.right_click_copy_target = None;
             }
             KeyEventAction::CutSelection => {
-                let target_to_cut = if app.right_click_popup_pos.is_some() {
-                    app.right_click_copy_target.clone()
-                } else {
-                    app.buffer
-                        .selected_text()
-                        .map(crate::app::RightClickCopyTarget::Selection)
-                };
-
-                if let Some(target) = target_to_cut {
-                    let text = match &target {
-                        crate::app::RightClickCopyTarget::Selection(s) => s,
-                        crate::app::RightClickCopyTarget::Buffer(s) => s,
-                        crate::app::RightClickCopyTarget::HistoryEntry(s) => s,
-                        crate::app::RightClickCopyTarget::Cwd(s) => s,
+                let (text_to_cut, is_selection) =
+                    if let Some(selection) = app.buffer.selected_text() {
+                        (Some(selection), true)
+                    } else {
+                        let buf = app.buffer.buffer().to_string();
+                        if !buf.is_empty() {
+                            (Some(buf), false)
+                        } else {
+                            (None, false)
+                        }
                     };
+
+                if let Some(text) = text_to_cut {
                     match crate::flush_stdout!(
                         "{}",
                         termina::escape::osc::Osc::SetSelection(
@@ -784,20 +792,11 @@ impl KeyEventAction {
                             log::error!("Failed to copy to clipboard via OSC 52: {}", e);
                         }
                     }
-                    match target {
-                        crate::app::RightClickCopyTarget::Selection(_) => {
-                            app.buffer.delete_selection();
-                        }
-                        crate::app::RightClickCopyTarget::Buffer(_) => {
-                            app.buffer.replace_buffer("");
-                            app.on_possible_buffer_change();
-                        }
-                        crate::app::RightClickCopyTarget::HistoryEntry(_) => {
-                            // History is read-only.
-                        }
-                        crate::app::RightClickCopyTarget::Cwd(_) => {
-                            // CWD is read-only.
-                        }
+                    if is_selection {
+                        app.buffer.delete_selection();
+                    } else {
+                        app.buffer.replace_buffer("");
+                        app.on_possible_buffer_change();
                     }
                 }
                 app.right_click_copy_target = None;
@@ -2260,6 +2259,11 @@ pub static DEFAULT_BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         ),
         Binding::new(
             &[KC::Escape.into()],
+            ContextVar::AgentOutputEntrySelected.into(),
+            &[KeyEventAction::AgentOutputDeselectEntry],
+        ),
+        Binding::new(
+            &[KC::Escape.into()],
             ContextVar::AgentOutputSelection.into(),
             &[KeyEventAction::EscapeToNormalMode],
         ),
@@ -2336,7 +2340,7 @@ pub static DEFAULT_BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
                 M::SUPER + KC::Char('c').into(),
             ],
             ContextVar::TextSelected.into(),
-            &[KeyEventAction::CopySelectionOsc52],
+            &[KeyEventAction::CopyTarget],
         ),
         Binding::new(
             &[
@@ -4211,6 +4215,8 @@ pub(crate) enum ContextVar {
     FuzzyHistorySearchNoneSelected,
     #[strum(message = "Agent output selection is active and no suggestion is currently selected")]
     AgentOutputNoneSelected,
+    #[strum(message = "Agent output selection is active and a suggestion is currently selected")]
+    AgentOutputEntrySelected,
     #[strum(message = "The leader key is currently active")]
     LeaderKeyActive,
 }
@@ -4341,6 +4347,13 @@ impl ContextVar {
             ContextVar::AgentOutputNoneSelected => {
                 if let ContentMode::AgentOutputSelection(ref selection) = app.content_mode {
                     selection.selected_idx.is_none()
+                } else {
+                    false
+                }
+            }
+            ContextVar::AgentOutputEntrySelected => {
+                if let ContentMode::AgentOutputSelection(ref selection) = app.content_mode {
+                    selection.selected_idx.is_some()
                 } else {
                     false
                 }
