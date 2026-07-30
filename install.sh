@@ -102,6 +102,10 @@ find_homebrew_bash() {
 }
 
 detect_os() {
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ] || (uname -o 2>/dev/null | grep -qi android) || (uname -a 2>/dev/null | grep -qi android); then
+        echo "android"
+        return
+    fi
     os="$(uname -s)"
     case "$os" in
         Linux) echo "linux" ;;
@@ -210,6 +214,25 @@ main() {
         fi
         TARGET="x86_64-unknown-freebsd"
         LIB_NAME="libflyline.so"
+    elif [ "$OS" = "android" ]; then
+        case "$ARCH" in
+            aarch64)
+                TARGET="aarch64-linux-android"
+                ;;
+            x86_64)
+                TARGET="x86_64-linux-android"
+                ;;
+            armv7)
+                TARGET="armv7-linux-androideabi"
+                ;;
+            i686)
+                TARGET="i686-linux-android"
+                ;;
+            *)
+                err "Unsupported Android architecture: $ARCH"
+                ;;
+        esac
+        LIB_NAME="libflyline.so"
     else
         LIBC="$(detect_libc)"
         case "$ARCH" in
@@ -293,10 +316,36 @@ main() {
     LIB_PATH="${INSTALL_DIR}/${LIB_NAME}"
     say "Installed: ${LIB_PATH}"
 
+    TERMUX_READLINE=""
+    if [ "$OS" = "android" ] && [ -f "/data/data/com.termux/files/usr/lib/libreadline.so" ]; then
+        TERMUX_READLINE="/data/data/com.termux/files/usr/lib/libreadline.so"
+    fi
+
+    # Verify that the library can be loaded by system bash before updating ~/.bashrc
+    if command -v bash >/dev/null 2>&1; then
+        if [ -n "$TERMUX_READLINE" ]; then
+            load_test="$(env LD_PRELOAD="$TERMUX_READLINE" bash -c "enable -f '$LIB_PATH' flyline" 2>&1 || true)"
+        else
+            load_test="$(bash -c "enable -f '$LIB_PATH' flyline" 2>&1 || true)"
+        fi
+        if echo "$load_test" | grep -q "dlopen failed"; then
+            warn "Failed to load ${LIB_PATH} with system bash (dlopen test failed)."
+            warn "Skipping automatic modification of ${BASHRC}."
+            warn "You can try loading it manually with:"
+            warn "    enable -f ${LIB_PATH} flyline"
+            return 0
+        fi
+    fi
+
     # Update or add 'enable -f ... flyline' in ~/.bashrc.
     if [ -z "${FLYLINE_VERSION:-}" ]; then
-        ENABLE_CMD="enable -f ${LIB_PATH} flyline"
-        printf '\n# Flyline - enhanced Bash experience\n%s\n' "$ENABLE_CMD" >> "$BASHRC"
+        if [ -n "$TERMUX_READLINE" ]; then
+            ENABLE_CMD="export LD_PRELOAD=\"\${LD_PRELOAD:+\$LD_PRELOAD:}${TERMUX_READLINE}\"\nenable -f ${LIB_PATH} flyline"
+            printf '\n# Flyline - enhanced Bash experience\ncase ":${LD_PRELOAD:-}:" in\n    *:%s:*) ;;\n    *) export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}%s" ;;\nesac\nenable -f %s flyline\n' "$TERMUX_READLINE" "$TERMUX_READLINE" "$LIB_PATH" >> "$BASHRC"
+        else
+            ENABLE_CMD="enable -f ${LIB_PATH} flyline"
+            printf '\n# Flyline - enhanced Bash experience\n%s\n' "$ENABLE_CMD" >> "$BASHRC"
+        fi
         say "Added flyline to ${BASHRC}"
     else
         say "Flyline is already installed (detected ${FLYLINE_VERSION}); skipping .bashrc modification."
