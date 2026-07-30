@@ -456,7 +456,13 @@ pub static DEFAULT_MOUSE_BINDINGS: LazyLock<Vec<MouseBinding>> = LazyLock::new(|
         MouseBinding::new(
             MouseContextVar::RightButtonClickedDown
                 + !MouseContextVar::OverCellSemantically(TagPattern::RightClickMenu),
-            &[MouseEventAction::RightClickMenuOpen],
+            &[
+                MouseEventAction::HoverSuggestion,
+                MouseEventAction::HoverHistoryResult,
+                MouseEventAction::HoverAiResult,
+                MouseEventAction::HoverCommand,
+                MouseEventAction::RightClickMenuOpen,
+            ],
         ),
         // Right click menu options (activated by Left Click Release / Up)
         MouseBinding::new(
@@ -1329,30 +1335,6 @@ impl MouseEventAction {
                 ));
                 app.mouse_state
                     .set_right_click_down_pos(mouse.row, mouse.column);
-
-                match clicked_tag {
-                    Some(Tag::Suggestion(idx)) => {
-                        if let ContentMode::TabCompletion(ref mut active_suggestions) =
-                            app.content_mode
-                        {
-                            active_suggestions.set_selected_by_idx(idx);
-                        }
-                    }
-                    Some(Tag::HistoryResult(idx)) => {
-                        if let ContentMode::FuzzyHistorySearch(source) = app.content_mode {
-                            app.select_fuzzy_history_manager_mut(&source)
-                                .fuzzy_search_set_idx(Some(idx));
-                        }
-                    }
-                    Some(Tag::AiResult(idx)) => {
-                        if let ContentMode::AgentOutputSelection(ref mut selection) =
-                            app.content_mode
-                        {
-                            selection.set_selected_by_idx(idx);
-                        }
-                    }
-                    _ => {}
-                }
 
                 let target = match clicked_tag {
                     Some(Tag::Suggestion(idx)) => {
