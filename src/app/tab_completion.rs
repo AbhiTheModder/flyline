@@ -2025,7 +2025,7 @@ mod tab_completion_tests {
                 }
             ]);
 
-            // But above that length, fuzzy filtering in active suggestions should just return dummy scores
+            // But above that length, fuzzy filtering falls back to substring matching
             let mut buffer = TextBuffer::new_with_cursor("mycmd ./len_65_plus_3/█");
             let active_suggestions = run_to_active_suggestions(&mut buffer);
             assert_eq!(buffer.buffer(), "mycmd ./len_65_plus_3/abcd_abcd_abcd_abcd_abcd_abcd_abcd_abcd_abcd_abcd_abcd_abcd_abcd_");
@@ -2047,13 +2047,13 @@ mod tab_completion_tests {
             assert_eq!(active_suggestions.filtered_suggestions, vec![
                 FilteredItem{
                     suggestion_idx: 0,
-                    score: 0,
-                    matching_indices: vec![],
+                    score: 3000,
+                    matching_indices: (0..65).collect(),
                 },
                 FilteredItem{
                     suggestion_idx: 1,
-                    score: 0,
-                    matching_indices: vec![],
+                    score: 3000,
+                    matching_indices: (0..65).collect(),
                 }
             ]);
 
