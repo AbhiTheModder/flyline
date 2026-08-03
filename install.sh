@@ -317,8 +317,13 @@ main() {
     say "Installed: ${LIB_PATH}"
 
     TERMUX_READLINE=""
-    if [ "$OS" = "android" ] && [ -f "/data/data/com.termux/files/usr/lib/libreadline.so" ]; then
-        TERMUX_READLINE="/data/data/com.termux/files/usr/lib/libreadline.so"
+    if [ "$OS" = "android" ]; then
+        for path in "${PREFIX:-}/lib/libreadline.so" "/data/data/com.termux/files/usr/lib/libreadline.so" "/usr/lib/libreadline.so"; do
+            if [ -f "$path" ]; then
+                TERMUX_READLINE="$path"
+                break
+            fi
+        done
     fi
 
     # Verify that the library can be loaded by system bash before updating ~/.bashrc
@@ -341,7 +346,7 @@ main() {
     if [ -z "${FLYLINE_VERSION:-}" ]; then
         if [ -n "$TERMUX_READLINE" ]; then
             ENABLE_CMD="export LD_PRELOAD=\"\${LD_PRELOAD:+\$LD_PRELOAD:}${TERMUX_READLINE}\"\nenable -f ${LIB_PATH} flyline"
-            printf '\n# Flyline - enhanced Bash experience\ncase ":${LD_PRELOAD:-}:" in\n    *:%s:*) ;;\n    *) export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}%s" ;;\nesac\nenable -f %s flyline\n' "$TERMUX_READLINE" "$TERMUX_READLINE" "$LIB_PATH" >> "$BASHRC"
+            printf '\n# Flyline - enhanced Bash experience\nif [[ ":$LD_PRELOAD:" != *"/libreadline.so"* ]]; then\n    export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}\${PREFIX:-/data/data/com.termux/files/usr}/lib/libreadline.so"\n    exec bash\nfi\nenable -f %s flyline\n' "$LIB_PATH" >> "$BASHRC"
         else
             ENABLE_CMD="enable -f ${LIB_PATH} flyline"
             printf '\n# Flyline - enhanced Bash experience\n%s\n' "$ENABLE_CMD" >> "$BASHRC"
@@ -386,7 +391,12 @@ main() {
         say "Installation complete!"
         say '    To activate in the current shell:'
         if [ -z "${FLYLINE_INSTALL_DIR:-}" ]; then
-            say "        $ENABLE_CMD"
+            if [ -n "$TERMUX_READLINE" ]; then
+                say "        export LD_PRELOAD=\"\${LD_PRELOAD:+\$LD_PRELOAD:}${TERMUX_READLINE}\""
+                say "        enable -f ${LIB_PATH} flyline"
+            else
+                say "        enable -f ${LIB_PATH} flyline"
+            fi
         else
             say "        enable -d flyline && enable -f ${LIB_PATH} flyline"
         fi
