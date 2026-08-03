@@ -1442,11 +1442,7 @@ impl<'a> App<'a> {
         let flycomp_settings = self.settings.flycomp.clone();
         let shared_handle =
             crate::threads::spawn_thread(crate::threads::ThreadTag::Flycomp, move || {
-                let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
-                new_action.sa_sigaction = libc::SIG_DFL as libc::sighandler_t as usize;
-                unsafe {
-                    libc::sigaction(libc::SIGCHLD, &new_action, std::ptr::null_mut());
-                }
+                crate::reset_sigchld();
                 flycomp::generate_completion_output_with_settings(
                     &cmd_word,
                     flycomp::OutputFormat::Bash,
@@ -1570,16 +1566,7 @@ impl<'a> App<'a> {
         // Safety: the guard `!ai_command.is_empty()` at the call site ensures
         // cmd_args is non-empty, so split_first() always returns Some.
         let (prog, args) = cmd_args.split_first().expect("ai_command is non-empty");
-        // Reset SIGCHLD to SIG_DFL just before spawning the agent.
-        // Command substitution in prompt parsing (e.g. `$(__git_ps1)`) executes
-        // Bash code that reinstalls Bash's SIGCHLD handler, undoing the initial
-        // setup in `Flyline::get()`. Without this, Bash's handler will intercept
-        // the child's exit and reap it, causing try_wait() to fail with ECHILD.
-        let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
-        new_action.sa_sigaction = libc::SIG_DFL as libc::sighandler_t as usize;
-        unsafe {
-            libc::sigaction(libc::SIGCHLD, &new_action, std::ptr::null_mut());
-        }
+        crate::reset_sigchld();
         match std::process::Command::new(prog)
             .args(args)
             .arg(&final_arg)
