@@ -947,6 +947,7 @@ enum PromptWidgetSubcommands {
 }
 impl Flyline {
     pub(crate) fn call(&mut self, words: *const bash_symbols::WordList) -> c_int {
+        let _sigchld_guard = crate::SigchldGuard::new();
         let mut args = vec![];
         unsafe {
             let mut current = words;
