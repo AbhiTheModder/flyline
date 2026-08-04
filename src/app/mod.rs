@@ -412,36 +412,35 @@ impl<'a> App<'a> {
             platform_terminal.set_panic_hook(|write| restore_terminal(write));
             configure_terminal(settings.enable_extended_key_codes);
 
-            let mut backend = ratatui::backend::TerminaBackend::new(platform_terminal);
+            let backend = ratatui::backend::TerminaBackend::new(platform_terminal);
             use ratatui::backend::Backend;
-            if let Ok(pos) = backend.get_cursor_position() {
-                log::debug!("Initial cursor position: {:?}", pos);
-                if pos.x > 0 {
-                    log::debug!("Cursor is not at the left of the terminal (x={}):", pos.x);
+            if let Some(width) = backend.size().ok().map(|s| s.width as usize) {
+                let (style, reset) = if !termina::style::Stylized::is_ansi_color_disabled() {
+                    use termina::escape::csi::{Csi, Sgr, SgrAttributes, SgrModifiers};
+                    use termina::style::ColorSpec;
+                    (
+                        Csi::Sgr(Sgr::Attributes(SgrAttributes {
+                            modifiers: SgrModifiers::INTENSITY_BOLD,
+                            foreground: Some(ColorSpec::RED),
+                            ..Default::default()
+                        }))
+                        .to_string(),
+                        Csi::Sgr(Sgr::Reset).to_string(),
+                    )
+                } else {
+                    (String::new(), String::new())
+                };
 
-                    let (style, reset) = if !termina::style::Stylized::is_ansi_color_disabled() {
-                        use termina::escape::csi::{Csi, Sgr, SgrAttributes, SgrModifiers};
-                        use termina::style::ColorSpec;
-                        (
-                            Csi::Sgr(Sgr::Attributes(SgrAttributes {
-                                modifiers: SgrModifiers::INTENSITY_BOLD,
-                                foreground: Some(ColorSpec::RED),
-                                ..Default::default()
-                            }))
-                            .to_string(),
-                            Csi::Sgr(Sgr::Reset).to_string(),
-                        )
-                    } else {
-                        (String::new(), String::new())
-                    };
+                use termina::escape::csi::{Csi, Edit, EraseInLine};
+                let clear_to_eol =
+                    Csi::Edit(Edit::EraseInLine(EraseInLine::EraseToEndOfLine)).to_string();
 
-                    let _ = crate::flush_stdout!(
-                        "{}{}{}\r\n",
-                        style,
-                        "[flyline inserted newline]",
-                        reset
-                    );
-                }
+                const TAG: &str = "[flyline inserted newline]";
+                let num_spaces = width.saturating_sub(TAG.len());
+                let spaces = " ".repeat(num_spaces);
+
+                let _ =
+                    crate::flush_stdout!("{}{}{}{}\r{}", style, TAG, reset, spaces, clear_to_eol);
             }
 
             ratatui::Terminal::with_options(
