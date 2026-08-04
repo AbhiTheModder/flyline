@@ -602,15 +602,11 @@ impl<'a> App<'a> {
                 let content =
                     self.create_content(frame_area.width, frame_area.y, last_terminal_size.height);
 
-                let remaining_height = last_terminal_size.height.saturating_sub(frame_area.y);
-                let desired_height = if self.needs_screen_cleared {
+                if self.needs_screen_cleared {
                     self.needs_screen_cleared = false;
-                    last_terminal_size.height
-                } else {
-                    remaining_height
-                        .max(content.height())
-                        .min(last_terminal_size.height)
-                };
+                    let _ = self.terminal.clear();
+                }
+                let desired_height = content.height().min(last_terminal_size.height);
 
                 // This helps to reduce flicker.
                 // Each time we call set_viewport_height, there is a chance it flickers.
