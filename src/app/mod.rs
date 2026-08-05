@@ -61,7 +61,8 @@ use std::io::{Error, ErrorKind, IsTerminal};
 use std::time::Duration;
 use std::vec;
 use termina::escape::csi::{
-    Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags, Mode as DecMode,
+    Csi, Cursor as CsiCursor, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags,
+    Mode as DecMode,
 };
 use termina::event::{
     KeyCode, KeyEvent, Modifiers as KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -374,6 +375,7 @@ pub(crate) struct App<'a> {
     /// Timestamp of the last keypress or mouse event; used for idle-based matrix animation.
     pub(super) last_activity_time: std::time::Instant,
     pub(super) leader_key_active_at: Option<std::time::Instant>,
+    pub(super) viewport_top_row: Option<u16>,
 }
 
 impl<'a> App<'a> {
@@ -404,13 +406,44 @@ impl<'a> App<'a> {
             log::info!("Warming path cache finished in {:?}", start.elapsed());
         });
 
-        let terminal = time_it!("startup: terminal setup", {
+        let (terminal, viewport_top_row) = time_it!("startup: terminal setup", {
             let event_reader = GLOBAL_EVENT_READER.clone();
             let mut platform_terminal =
                 termina::PlatformTerminal::with_reader(event_reader).unwrap();
             platform_terminal.enter_raw_mode().unwrap();
             platform_terminal.set_panic_hook(|write| restore_terminal(write));
             configure_terminal(settings.enable_extended_key_codes);
+
+            let req_csi = Csi::Cursor(CsiCursor::RequestActivePositionReport);
+            let _ = crate::flush_stdout!("{req_csi}");
+
+            let is_apr_event = |event: &TerminaEvent| {
+                matches!(
+                    event,
+                    TerminaEvent::Csi(Csi::Cursor(CsiCursor::ActivePositionReport { .. }))
+                )
+            };
+
+            let viewport_top_row = if GLOBAL_EVENT_READER
+                .poll(Some(Duration::from_millis(100)), is_apr_event)
+                .unwrap_or(false)
+            {
+                if let Ok(TerminaEvent::Csi(Csi::Cursor(CsiCursor::ActivePositionReport {
+                    line,
+                    ..
+                }))) = GLOBAL_EVENT_READER.read(is_apr_event)
+                {
+                    log::debug!(
+                        "Initial viewport top row captured in App::new: y={}",
+                        line.get_zero_based()
+                    );
+                    Some(line.get_zero_based())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let backend = ratatui::backend::TerminaBackend::new(platform_terminal);
             use ratatui::backend::Backend;
@@ -443,13 +476,15 @@ impl<'a> App<'a> {
                     crate::flush_stdout!("{}{}{}{}\r{}", style, TAG, reset, spaces, clear_to_eol);
             }
 
-            ratatui::Terminal::with_options(
+            let term = ratatui::Terminal::with_options(
                 backend,
                 TerminalOptions {
                     viewport: Viewport::Inline(0),
                 },
             )
-            .expect("Failed to create terminal")
+            .expect("Failed to create terminal");
+
+            (term, viewport_top_row)
         });
 
         let mut app = App {
@@ -502,6 +537,7 @@ impl<'a> App<'a> {
             right_click_copy_target: None,
             last_activity_time: std::time::Instant::now(),
             leader_key_active_at: None,
+            viewport_top_row,
         };
 
         app.on_possible_buffer_change();
@@ -647,6 +683,7 @@ impl<'a> App<'a> {
                             content,
                             needs_full_redraw,
                             show_terminal_cursor,
+                            self.viewport_top_row.unwrap_or(0),
                         ));
                     })
                 };
@@ -656,6 +693,27 @@ impl<'a> App<'a> {
                 match draw_result {
                     Ok(_) => {
                         self.last_draw_time = std::time::Instant::now();
+
+                        if let (Some(drawn), Some(top_row)) =
+                            (&mut self.last_contents, self.viewport_top_row)
+                        {
+                            let content_height = drawn.contents.height();
+                            let term_height = last_terminal_size.height;
+                            let bottom_row = top_row + content_height;
+                            if bottom_row > term_height {
+                                let overflow = bottom_row - term_height;
+                                let new_top = top_row.saturating_sub(overflow);
+                                log::debug!(
+                                    "Adjusting viewport_top_row due to scroll: {} -> {} (content_height={}, term_height={})",
+                                    top_row,
+                                    new_top,
+                                    content_height,
+                                    term_height
+                                );
+                                self.viewport_top_row = Some(new_top);
+                                drawn.viewport_start = new_top;
+                            }
+                        }
 
                         if matches!(
                             self.settings.send_shell_integration_codes,
@@ -713,11 +771,24 @@ impl<'a> App<'a> {
                             self.on_mouse(mouse)
                         }
                         TerminaEvent::WindowResized(winsize) => {
-                            // log::trace!("Terminal resized to {}x{}", winsize.cols, winsize.rows);
                             last_terminal_size = Size {
                                 width: winsize.cols,
                                 height: winsize.rows,
                             };
+                            if let (Some(drawn), Some(top_row)) =
+                                (&mut self.last_contents, self.viewport_top_row)
+                            {
+                                let content_height = drawn.contents.height();
+                                let term_height = winsize.rows;
+                                let bottom_row = top_row + content_height;
+                                if bottom_row > term_height {
+                                    let overflow = bottom_row - term_height;
+                                    let new_top = top_row.saturating_sub(overflow);
+                                    self.viewport_top_row = Some(new_top);
+                                    drawn.viewport_start = new_top;
+                                }
+                            }
+                            self.needs_full_redraw = true;
                             true
                         }
                         TerminaEvent::FocusOut => {

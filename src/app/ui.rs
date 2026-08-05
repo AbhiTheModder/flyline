@@ -24,6 +24,15 @@ impl DrawnContent {
             + self.content_visible_row_range.start as isize
     }
 
+    pub fn frame_cursor_pos(&self) -> Option<Position> {
+        self.contents.term_cursor_pos.map(|cursor_pos| Position {
+            x: cursor_pos.col,
+            y: cursor_pos
+                .row
+                .saturating_sub(self.content_visible_row_range.start),
+        })
+    }
+
     pub fn term_em_cursor_pos(&self) -> Option<Position> {
         self.contents.term_cursor_pos.map(|cursor_pos| Position {
             x: cursor_pos.col,
@@ -1502,6 +1511,7 @@ impl<'a> App<'a> {
         content: Contents,
         needs_full_redraw: bool,
         show_terminal_cursor: bool,
+        viewport_top_row: u16,
     ) -> DrawnContent {
         let frame_area = frame.area();
         frame.buffer_mut().reset();
@@ -1531,13 +1541,13 @@ impl<'a> App<'a> {
 
         let drawn_content = DrawnContent {
             contents: content,
-            viewport_start: frame_area.y,
+            viewport_start: viewport_top_row,
             content_visible_row_range,
         };
 
         if show_terminal_cursor {
-            if let Some(term_em_cursor) = drawn_content.term_em_cursor_pos() {
-                frame.set_cursor_position(term_em_cursor);
+            if let Some(frame_cursor) = drawn_content.frame_cursor_pos() {
+                frame.set_cursor_position(frame_cursor);
             }
         }
 
