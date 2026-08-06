@@ -117,9 +117,8 @@ fn configure_terminal(extended_key_codes: bool) {
         KittyKeyboardFlags::empty()
     };
     let _ = crate::flush_stdout!(
-        "{}{}{}",
+        "{}{}",
         set_mode(DecPrivateModeCode::BracketedPaste),
-        set_mode(DecPrivateModeCode::FocusTracking),
         Csi::Keyboard(Keyboard::PushFlags(flags))
     );
 }
@@ -372,10 +371,13 @@ pub(crate) struct App<'a> {
     pub(super) right_click_popup_pos: Option<crate::content_builder::Coord>,
     /// Target content to copy/cut determined at right-click depress time.
     pub(super) right_click_copy_target: Option<RightClickCopyTarget>,
-    /// Timestamp of the last keypress or mouse event; used for idle-based matrix animation.
     pub(super) last_activity_time: std::time::Instant,
     pub(super) leader_key_active_at: Option<std::time::Instant>,
-    pub(super) viewport_top_row: Option<u16>,
+    pub(super) app_start_time: std::time::Instant,
+    pub(super) has_requested_cpr: bool,
+    pub(super) has_enabled_focus_tracking: bool,
+    pub(super) last_resize_time: Option<std::time::Instant>,
+    pub(super) needs_cpr_after_resize: bool,
 }
 
 impl<'a> App<'a> {
@@ -406,44 +408,13 @@ impl<'a> App<'a> {
             log::info!("Warming path cache finished in {:?}", start.elapsed());
         });
 
-        let (terminal, viewport_top_row) = time_it!("startup: terminal setup", {
+        let terminal = time_it!("startup: terminal setup", {
             let event_reader = GLOBAL_EVENT_READER.clone();
             let mut platform_terminal =
                 termina::PlatformTerminal::with_reader(event_reader).unwrap();
             platform_terminal.enter_raw_mode().unwrap();
             platform_terminal.set_panic_hook(|write| restore_terminal(write));
             configure_terminal(settings.enable_extended_key_codes);
-
-            let req_csi = Csi::Cursor(CsiCursor::RequestActivePositionReport);
-            let _ = crate::flush_stdout!("{req_csi}");
-
-            let is_apr_event = |event: &TerminaEvent| {
-                matches!(
-                    event,
-                    TerminaEvent::Csi(Csi::Cursor(CsiCursor::ActivePositionReport { .. }))
-                )
-            };
-
-            let viewport_top_row = if GLOBAL_EVENT_READER
-                .poll(Some(Duration::from_millis(100)), is_apr_event)
-                .unwrap_or(false)
-            {
-                if let Ok(TerminaEvent::Csi(Csi::Cursor(CsiCursor::ActivePositionReport {
-                    line,
-                    ..
-                }))) = GLOBAL_EVENT_READER.read(is_apr_event)
-                {
-                    log::debug!(
-                        "Initial viewport top row captured in App::new: y={}",
-                        line.get_zero_based()
-                    );
-                    Some(line.get_zero_based())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
 
             let backend = ratatui::backend::TerminaBackend::new(platform_terminal);
             use ratatui::backend::Backend;
@@ -476,15 +447,13 @@ impl<'a> App<'a> {
                     crate::flush_stdout!("{}{}{}{}\r{}", style, TAG, reset, spaces, clear_to_eol);
             }
 
-            let term = ratatui::Terminal::with_options(
+            ratatui::Terminal::with_options(
                 backend,
                 TerminalOptions {
                     viewport: Viewport::Inline(0),
                 },
             )
-            .expect("Failed to create terminal");
-
-            (term, viewport_top_row)
+            .expect("Failed to create terminal")
         });
 
         let mut app = App {
@@ -537,11 +506,45 @@ impl<'a> App<'a> {
             right_click_copy_target: None,
             last_activity_time: std::time::Instant::now(),
             leader_key_active_at: None,
-            viewport_top_row,
+            app_start_time: std::time::Instant::now(),
+            has_requested_cpr: false,
+            has_enabled_focus_tracking: false,
+            last_resize_time: None,
+            needs_cpr_after_resize: false,
         };
 
         app.on_possible_buffer_change();
         app
+    }
+
+    fn sync_viewport_top_from_cpr(&mut self) {
+        let req_csi = Csi::Cursor(CsiCursor::RequestActivePositionReport);
+        let _ = crate::flush_stdout!("{req_csi}");
+
+        let is_apr_event = |event: &TerminaEvent| {
+            matches!(
+                event,
+                TerminaEvent::Csi(Csi::Cursor(CsiCursor::ActivePositionReport { .. }))
+            )
+        };
+
+        if GLOBAL_EVENT_READER
+            .poll(Some(Duration::from_millis(500)), is_apr_event)
+            .unwrap_or(false)
+        {
+            if let Ok(TerminaEvent::Csi(Csi::Cursor(CsiCursor::ActivePositionReport {
+                line,
+                ..
+            }))) = GLOBAL_EVENT_READER.read(is_apr_event)
+            {
+                let abs_row = line.get_zero_based();
+                let top = abs_row.saturating_sub(self.terminal.inline_cursor_y());
+                self.terminal.set_viewport_top(top);
+                if let Some(ref mut drawn) = self.last_contents {
+                    drawn.viewport_start = top;
+                }
+            }
+        }
     }
 
     /// Return a mutable reference to the history manager for the given fuzzy source.
@@ -609,6 +612,27 @@ impl<'a> App<'a> {
         let mut last_terminal_size = self.terminal.size().unwrap();
 
         'main_loop: loop {
+            if self.app_start_time.elapsed() >= Duration::from_millis(100) {
+                if !self.has_requested_cpr {
+                    self.has_requested_cpr = true;
+                    self.sync_viewport_top_from_cpr();
+                }
+                if !self.has_enabled_focus_tracking {
+                    self.has_enabled_focus_tracking = true;
+                    let set_mode =
+                        |code| Csi::Mode(DecMode::SetDecPrivateMode(DecPrivateMode::Code(code)));
+                    let _ = crate::flush_stdout!("{}", set_mode(DecPrivateModeCode::FocusTracking));
+                }
+            }
+
+            if self.needs_cpr_after_resize
+                && self
+                    .last_resize_time
+                    .map_or(false, |t| t.elapsed() >= Duration::from_millis(200))
+            {
+                self.needs_cpr_after_resize = false;
+                self.sync_viewport_top_from_cpr();
+            }
             if self.poll_agent() {
                 redraw = true;
             }
@@ -674,6 +698,7 @@ impl<'a> App<'a> {
                     self.needs_full_redraw = false;
                 }
 
+                let current_viewport_top = self.terminal.viewport_top().unwrap_or(0);
                 let mut drawn_content: Option<DrawnContent> = None;
                 let draw_result = {
                     let _timer = crate::perf::PerfTimer::start("draw");
@@ -683,7 +708,7 @@ impl<'a> App<'a> {
                             content,
                             needs_full_redraw,
                             show_terminal_cursor,
-                            self.viewport_top_row.unwrap_or(0),
+                            current_viewport_top,
                         ));
                     })
                 };
@@ -694,24 +719,9 @@ impl<'a> App<'a> {
                     Ok(_) => {
                         self.last_draw_time = std::time::Instant::now();
 
-                        if let (Some(drawn), Some(top_row)) =
-                            (&mut self.last_contents, self.viewport_top_row)
-                        {
-                            let content_height = drawn.contents.height();
-                            let term_height = last_terminal_size.height;
-                            let bottom_row = top_row + content_height;
-                            if bottom_row > term_height {
-                                let overflow = bottom_row - term_height;
-                                let new_top = top_row.saturating_sub(overflow);
-                                log::debug!(
-                                    "Adjusting viewport_top_row due to scroll: {} -> {} (content_height={}, term_height={})",
-                                    top_row,
-                                    new_top,
-                                    content_height,
-                                    term_height
-                                );
-                                self.viewport_top_row = Some(new_top);
-                                drawn.viewport_start = new_top;
+                        if let Some(top) = self.terminal.viewport_top() {
+                            if let Some(ref mut drawn) = self.last_contents {
+                                drawn.viewport_start = top;
                             }
                         }
 
@@ -775,19 +785,9 @@ impl<'a> App<'a> {
                                 width: winsize.cols,
                                 height: winsize.rows,
                             };
-                            if let (Some(drawn), Some(top_row)) =
-                                (&mut self.last_contents, self.viewport_top_row)
-                            {
-                                let content_height = drawn.contents.height();
-                                let term_height = winsize.rows;
-                                let bottom_row = top_row + content_height;
-                                if bottom_row > term_height {
-                                    let overflow = bottom_row - term_height;
-                                    let new_top = top_row.saturating_sub(overflow);
-                                    self.viewport_top_row = Some(new_top);
-                                    drawn.viewport_start = new_top;
-                                }
-                            }
+                            self.terminal.clear_viewport_top();
+                            self.last_resize_time = Some(std::time::Instant::now());
+                            self.needs_cpr_after_resize = true;
                             self.needs_full_redraw = true;
                             true
                         }
@@ -895,6 +895,7 @@ impl<'a> App<'a> {
     /// This is meant to mimic bash_execute_unix_command from bashline.c
     pub(crate) fn run_bash_command(&mut self, cmd: &str) {
         let mouse_enabled = self.mouse_state.is_enabled();
+        self.mouse_state.disable();
 
         // 1. Export READLINE_* variables before running command
         let selection_was_active = self.buffer.selection_byte().is_some();
@@ -940,6 +941,8 @@ impl<'a> App<'a> {
         if mouse_enabled {
             self.mouse_state.enable();
         }
+
+        self.sync_viewport_top_from_cpr();
 
         // 5. Read READLINE_* env vars and set text buffer, cursor, and mark positions
         if let Some(new_line) = crate::bash_funcs::get_envvar_value("READLINE_LINE") {

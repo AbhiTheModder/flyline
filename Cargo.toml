@@ -14,13 +14,13 @@ crate-type = ["cdylib"]
 mimalloc = { version = "0.1.52", default-features = false, features = ["local_dynamic_tls"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.3", features = ["unstable-dynamic"] }
-ratatui = { git = "https://github.com/HalFrgrd/ratatui.git", rev = "90f1b77e185579353fa4ebb850ab30e99ee18bed", default-features = false, features = ["termina", "unstable-rendered-line-info", "unstable-backend-writer", "serde", "macros"] }
+ratatui = { git = "https://github.com/HalFrgrd/ratatui.git", rev = "99afe70184dd50483e0b7c0f6afa515c511af06b", default-features = false, features = ["termina", "unstable-rendered-line-info", "unstable-backend-writer", "serde", "macros"] }
 termina = { git = "https://github.com/HalFrgrd/termina.git", rev = "529aeb6b65660d642af221f4f6a09b7e4fc51213" }
 chrono = { version = "0.4" }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 parking_lot = "0.12"
-ansi-to-tui = { git = "https://github.com/HalFrgrd/ansi-to-tui.git", rev = "1129e3612930769fa8b847f4adf92b927f3e82fc" }
+ansi-to-tui = { git = "https://github.com/HalFrgrd/ansi-to-tui.git", rev = "78bdac7021836dda51a986a9854e2b01ec2ec317" }
 libc = "0.2.186"
 anyhow = "1.0.102"
 unicode-width = { version = "0.2.0", default-features = false }
@@ -30,7 +30,7 @@ glob = "0.3.3"
 flash = { git = "https://github.com/HalFrgrd/flash.git", rev = "59af2ab94aaa6b7a407d09549605b1d3bc81256c" }
 skim = { git = "https://github.com/HalFrgrd/skim", rev = "7908ee85a5f6cd49575925fcc0bdef3999409d26", default-features =  false, features = ["algos_only"]}
 lscolors = "0.21.0"
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 shlex = "1.3.0"
 rand = "0.10.1"
