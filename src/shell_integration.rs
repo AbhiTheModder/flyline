@@ -257,7 +257,7 @@ pub fn write_after_rendering_codes(
 pub fn write_on_exit_codes(commandline: Option<&str>) -> std::io::Result<()> {
     let codes: Vec<EscapeCodes> = if is_vscode() {
         let nonce = bash_funcs::get_envvar_value("VSCODE_NONCE");
-        log::info!("vscode_nonce: {:?}", nonce);
+        log::trace!("vscode_nonce: {:?}", nonce);
         match commandline {
             Some(cmd) => vec![
                 EscapeCodes::VscCommandLine {
@@ -292,7 +292,7 @@ pub fn write_escape_codes(codes: &[EscapeCodes]) -> std::io::Result<()> {
             _ => None,
         };
         if let Some(rel_pos) = rel_pos {
-            log::info!(
+            log::trace!(
                 "Moving cursor relative (col={}, dy={}) for escape code: {:?}",
                 rel_pos.col,
                 rel_pos.dy,
@@ -311,11 +311,11 @@ pub fn write_escape_codes(codes: &[EscapeCodes]) -> std::io::Result<()> {
                     rel_pos.col
                 )))
             )?;
-            log::info!("Writing escape code: {:?}", code);
+            log::trace!("Writing escape code: {:?}", code);
             write!(queue, "{}", code)?;
             write!(queue, "{}", Csi::Cursor(Cursor::RestoreCursor))?;
         } else {
-            log::info!("Writing escape code: {:?}", code);
+            log::trace!("Writing escape code: {:?}", code);
             write!(queue, "{}", code)?;
         }
     }

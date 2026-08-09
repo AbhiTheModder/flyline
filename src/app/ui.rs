@@ -1557,10 +1557,9 @@ impl<'a> App<'a> {
             content_visible_row_range,
         };
 
-        if show_terminal_cursor {
-            if let Some(frame_cursor) = drawn_content.frame_cursor_pos() {
-                frame.set_cursor_position(frame_cursor);
-            }
+        if let Some(frame_cursor) = drawn_content.frame_cursor_pos() {
+            frame.set_cursor_position(frame_cursor);
+            frame.set_cursor_visibility(show_terminal_cursor);
         }
 
         drawn_content
