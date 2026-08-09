@@ -541,7 +541,7 @@ impl<'a> App<'a> {
                 let top = abs_row.saturating_sub(self.terminal.inline_cursor_y());
                 self.terminal.set_viewport_top(top);
                 if let Some(ref mut drawn) = self.last_contents {
-                    drawn.viewport_start = top;
+                    drawn.viewport_start = Some(top);
                 }
             }
         }
@@ -579,8 +579,7 @@ impl<'a> App<'a> {
         // Send execution finished escape codes (previous command has completed).
         time_it!("startup: escape codes", {
             if self.settings.send_shell_integration_codes == settings::ShellIntegrationLevel::Full {
-                let last_command_exit_value =
-                    unsafe { crate::bash_symbols::last_command_exit_value };
+                let last_command_exit_value = bash_funcs::get_last_command_exit_value();
                 let hostname = bash_funcs::get_hostname();
                 let cwd = bash_funcs::get_cwd();
 
@@ -662,6 +661,7 @@ impl<'a> App<'a> {
                 let content =
                     self.create_content(frame_area.width, frame_area.y, last_terminal_size.height);
 
+                let was_screen_cleared = self.needs_screen_cleared;
                 if self.needs_screen_cleared {
                     self.needs_screen_cleared = false;
                     let _ = self.terminal.clear();
@@ -698,7 +698,7 @@ impl<'a> App<'a> {
                     self.needs_full_redraw = false;
                 }
 
-                let current_viewport_top = self.terminal.viewport_top().unwrap_or(0);
+                let current_viewport_top = self.terminal.viewport_top();
                 let mut drawn_content: Option<DrawnContent> = None;
                 let draw_result = {
                     let _timer = crate::perf::PerfTimer::start("draw");
@@ -721,7 +721,7 @@ impl<'a> App<'a> {
 
                         if let Some(top) = self.terminal.viewport_top() {
                             if let Some(ref mut drawn) = self.last_contents {
-                                drawn.viewport_start = top;
+                                drawn.viewport_start = Some(top);
                             }
                         }
 
@@ -730,17 +730,29 @@ impl<'a> App<'a> {
                             settings::ShellIntegrationLevel::OnlyPromptPos
                                 | settings::ShellIntegrationLevel::Full
                         ) {
-                            shell_integration::write_after_rendering_codes(
+                            let force_resend_prompt_codes = was_screen_cleared || needs_full_redraw;
+                            let prev_start = if force_resend_prompt_codes {
+                                None
+                            } else {
                                 prev_contents
                                     .as_ref()
-                                    .and_then(|c| c.term_em_prompt_start()),
-                                prev_contents.as_ref().and_then(|c| c.term_em_prompt_end()),
+                                    .and_then(|c| c.prompt_start_relative())
+                            };
+                            let prev_end = if force_resend_prompt_codes {
+                                None
+                            } else {
+                                prev_contents.as_ref().and_then(|c| c.prompt_end_relative())
+                            };
+
+                            shell_integration::write_after_rendering_codes(
+                                prev_start,
+                                prev_end,
                                 self.last_contents
                                     .as_ref()
-                                    .and_then(|c| c.term_em_prompt_start()),
+                                    .and_then(|c| c.prompt_start_relative()),
                                 self.last_contents
                                     .as_ref()
-                                    .and_then(|c| c.term_em_prompt_end()),
+                                    .and_then(|c| c.prompt_end_relative()),
                                 self.mode.is_running(),
                             )
                             .unwrap_or_else(|e| {
@@ -1028,8 +1040,9 @@ impl<'a> App<'a> {
             .is_some_and(|tag| matches!(tag, Tag::Command(_)))
             && matches!(mouse.kind, MouseEventKind::Drag(_));
         if is_dragging_command {
-            if let Some(ref drawn) = self.last_contents {
-                let content_row = drawn.term_em_row_to_content_row(mouse.row);
+            if let Some(ref drawn) = self.last_contents
+                && let Some(content_row) = drawn.term_em_row_to_content_row(mouse.row)
+            {
                 if content_row >= drawn.contents.buf.len() as isize {
                     semantic_tag = Some(Tag::Command(self.buffer.buffer().len()));
                 } else if content_row < 0 || (content_row == 0 && semantic_tag.is_none()) {
@@ -1144,7 +1157,7 @@ impl<'a> App<'a> {
     pub fn reevaluate_pointer_shape(&mut self) {
         if self.settings.mouse_mode == settings::MouseMode::Disabled {
             self.mouse_state
-                .set_pointer_shape(crate::mouse_state::PointerShape::Default, false);
+                .set_pointer_shape(crate::mouse_state::PointerShape::Default);
             return;
         }
 
@@ -1168,13 +1181,7 @@ impl<'a> App<'a> {
                 for action in &binding.actions {
                     if let crate::app::actions::mouse::MouseEventAction::SetPointer(shape) = action
                     {
-                        let is_click_event = self.last_mouse.as_ref().is_some_and(|m| {
-                            matches!(
-                                m.mouse.kind,
-                                MouseEventKind::Down(_) | MouseEventKind::Up(_)
-                            )
-                        });
-                        self.mouse_state.set_pointer_shape(*shape, is_click_event);
+                        self.mouse_state.set_pointer_shape(*shape);
                         return;
                     }
                 }
