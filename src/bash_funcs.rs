@@ -430,6 +430,7 @@ pub fn get_all_aliases() -> Vec<String> {
             }
             offset += 1;
         }
+        bash_symbols::locked_xfree(alias_ptr as *mut libc::c_void);
     }
 
     aliases
@@ -468,6 +469,7 @@ pub fn get_all_variables_with_prefix(prefix: &str) -> Vec<String> {
         }
 
         let mut offset = 0;
+        let mut ptrs_to_free = Vec::new();
         loop {
             let ptr = *var_ptr.add(offset);
             if ptr.is_null() {
@@ -477,8 +479,13 @@ pub fn get_all_variables_with_prefix(prefix: &str) -> Vec<String> {
             if let Ok(str_slice) = c_str.to_str() {
                 variables.push(format!("${}", str_slice));
             }
+            ptrs_to_free.push(ptr);
             offset += 1;
         }
+        for str_ptr in ptrs_to_free {
+            bash_symbols::locked_xfree(str_ptr as *mut libc::c_void);
+        }
+        bash_symbols::locked_xfree(var_ptr as *mut libc::c_void);
     }
 
     log::debug!("Found variables with prefix '{}': {:?}", prefix, variables);
@@ -505,29 +512,30 @@ pub fn get_all_shell_functions() -> Vec<String> {
     let mut functions = Vec::new();
 
     unsafe {
-        let func_ptr = bash_symbols::all_shell_functions();
-        if func_ptr.is_null() {
+        let table_ptr = bash_symbols::shell_functions;
+        if table_ptr.is_null() {
             return functions;
         }
 
-        let mut offset = 0;
-        loop {
-            let ptr = *func_ptr.add(offset);
-            if ptr.is_null() {
-                break;
-            }
-            let shell_var = &*ptr;
-            if !shell_var.name.is_null() {
-                let c_str = std::ffi::CStr::from_ptr(shell_var.name);
-                if let Ok(str_slice) = c_str.to_str() {
-                    functions.push(str_slice.to_string());
+        let table = &*table_ptr;
+        if table.bucket_array.is_null() || table.nbuckets <= 0 {
+            return functions;
+        }
+
+        for i in 0..table.nbuckets as isize {
+            let mut bucket_ptr = *table.bucket_array.offset(i);
+            while !bucket_ptr.is_null() {
+                let item = &*bucket_ptr;
+                if !item.key.is_null() {
+                    if let Ok(name) = std::ffi::CStr::from_ptr(item.key).to_str() {
+                        functions.push(name.to_string());
+                    }
                 }
+                bucket_ptr = item.next;
             }
-            offset += 1;
         }
     }
 
-    // log::debug!("Found shell functions: {:?}", functions);
     functions
 }
 
@@ -1263,6 +1271,7 @@ pub fn get_shell_var(var_name: &str) -> Option<ShellVar> {
 
 #[cfg(not(test))]
 pub fn get_envvar_value(var_name: &str) -> Option<String> {
+    let _guard = crate::bash_symbols::BASH_LOCK.lock();
     get_shell_var(var_name).and_then(|var| var.get_value())
 }
 
@@ -2020,6 +2029,7 @@ pub fn export_env_var(name: &str, value: &str) -> Result<()> {
 
 #[cfg(not(test))]
 pub fn unset_env_var(name: &str) -> Result<()> {
+    let _guard = crate::bash_symbols::BASH_LOCK.lock();
     unsafe {
         let name_cstr = std::ffi::CString::new(name)?;
         let res = bash_symbols::unbind_variable(name_cstr.as_ptr());
