@@ -107,6 +107,9 @@ struct FlylineArgs {
     /// Enabled by default; pass `--enable-easter-eggs false` to disable.
     #[arg(long = "enable-easter-eggs", default_missing_value = "true", num_args = 0..=1)]
     enable_easter_eggs: Option<bool>,
+    /// Resize strategy for cursor placement on window resize (auto-cleared, reflowed-apart-from-cursor, reflowed-all).
+    #[arg(long = "set-resize-logic", value_name = "STRATEGY", hide = true)]
+    set_resize_logic: Option<settings::ResizeLogic>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -1015,6 +1018,11 @@ impl Flyline {
                 if let Some(enabled) = parsed.enable_easter_eggs {
                     log::info!("Easter eggs enabled: {}", enabled);
                     self.settings.enable_easter_eggs = enabled;
+                }
+
+                if let Some(logic) = parsed.set_resize_logic {
+                    log::info!("Resize logic set to {:?}", logic);
+                    self.settings.resize_logic = logic;
                 }
 
                 match parsed.command {
