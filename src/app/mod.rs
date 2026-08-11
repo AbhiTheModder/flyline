@@ -376,6 +376,7 @@ pub(crate) struct App<'a> {
     pub(super) app_start_time: std::time::Instant,
     pub(super) has_requested_cpr: bool,
     pub(super) has_enabled_focus_tracking: bool,
+    pub(super) last_resize_time: Option<std::time::Instant>,
 }
 
 impl<'a> App<'a> {
@@ -512,6 +513,7 @@ impl<'a> App<'a> {
             app_start_time: std::time::Instant::now(),
             has_requested_cpr: false,
             has_enabled_focus_tracking: false,
+            last_resize_time: None,
         };
 
         app.on_possible_buffer_change();
@@ -583,12 +585,35 @@ impl<'a> App<'a> {
 
     /// Computes the display width of line `y` in `buffer` by finding the rightmost non-empty cell.
     pub fn compute_line_width_from_buffer(buffer: &ratatui::buffer::Buffer, y: u16) -> u16 {
+        Self::compute_line_width_from_buffer_opts(buffer, y, false)
+    }
+
+    /// Computes the display width of line `y` in `buffer`, optionally trimming trailing whitespace.
+    pub fn compute_line_width_from_buffer_opts(
+        buffer: &ratatui::buffer::Buffer,
+        y: u16,
+        trim_whitespace: bool,
+    ) -> u16 {
         let old_width = buffer.area.width;
         let mut line_width = 0u16;
         for x in (0..old_width).rev() {
             if let Some(cell) = buffer.cell(ratatui::layout::Position { x, y }) {
-                let is_empty = cell.symbol_opt().map_or(true, |s| s.is_empty());
+                let is_empty = cell.symbol_opt().map_or(true, |s| {
+                    if trim_whitespace {
+                        s.trim().is_empty()
+                    } else {
+                        s.is_empty()
+                    }
+                });
                 if !is_empty {
+                    log::info!(
+                        "[LineWidth] Line {} (old_width={}, trim_ws={}) rightmost non-empty cell at x={} with symbol {:?}",
+                        y,
+                        old_width,
+                        trim_whitespace,
+                        x,
+                        cell.symbol_opt()
+                    );
                     let sym_width = cell
                         .symbol_opt()
                         .map(|s| unicode_width::UnicodeWidthStr::width(s) as u16)
@@ -624,11 +649,13 @@ impl<'a> App<'a> {
             return inline_cursor_y;
         }
 
+        let trim_whitespace = resize_logic == settings::ResizeLogic::ReflowedAllWhitespaceTrimmed;
+
         let mut total_rows = 0u16;
 
         // Calculate rows for each line above the cursor (y < inline_cursor_y)
         for y in 0..inline_cursor_y {
-            let line_width = Self::compute_line_width_from_buffer(buffer, y);
+            let line_width = Self::compute_line_width_from_buffer_opts(buffer, y, trim_whitespace);
 
             log::info!(
                 "Line {} width before resize: {}, new width: {}",
@@ -653,7 +680,8 @@ impl<'a> App<'a> {
                 // the cursor screen Y position for each extra row added below the cursor.
                 let total_buffer_height = buffer.area.height;
                 for y in (inline_cursor_y + 1)..total_buffer_height {
-                    let line_width = Self::compute_line_width_from_buffer(buffer, y);
+                    let line_width =
+                        Self::compute_line_width_from_buffer_opts(buffer, y, trim_whitespace);
                     if line_width > new_width {
                         let extra_rows = (line_width + new_width - 1) / new_width - 1;
                         log::info!(
@@ -666,7 +694,8 @@ impl<'a> App<'a> {
                     }
                 }
             }
-            settings::ResizeLogic::ReflowedAll => {
+            settings::ResizeLogic::ReflowedAll
+            | settings::ResizeLogic::ReflowedAllWhitespaceTrimmed => {
                 // Cursor row wraps at new_width; cursor is offset by inline_cursor_x / new_width
                 let cursor_row_offset = inline_cursor_x / new_width;
                 total_rows += cursor_row_offset;
@@ -743,18 +772,30 @@ impl<'a> App<'a> {
         let mut last_terminal_size = self.terminal.size().unwrap();
 
         'main_loop: loop {
-            if self.app_start_time.elapsed() >= Duration::from_millis(100) {
-                if !self.has_requested_cpr {
-                    self.has_requested_cpr = true;
-                    self.sync_viewport_top_from_cpr();
+            const LONG_ENOUGH: Duration = Duration::from_millis(150);
+
+            let long_enough_since_startup = self.app_start_time.elapsed() >= LONG_ENOUGH;
+            let long_enough_since_resize = self
+                .last_resize_time
+                .map_or(true, |t| t.elapsed() >= LONG_ENOUGH);
+
+            if !self.has_requested_cpr && long_enough_since_resize {
+                if long_enough_since_startup {
                     let _ = crate::term_info::get_term_info(&GLOBAL_EVENT_READER);
                 }
-                if !self.has_enabled_focus_tracking {
-                    self.has_enabled_focus_tracking = true;
-                    let set_mode =
-                        |code| Csi::Mode(DecMode::SetDecPrivateMode(DecPrivateMode::Code(code)));
-                    let _ = crate::flush_stdout!("{}", set_mode(DecPrivateModeCode::FocusTracking));
+                self.has_requested_cpr = true;
+                self.sync_viewport_top_from_cpr();
+
+                if self.terminal.viewport_top().is_none() {
+                    log::warn!("[Resize] CPR returned None for viewport_top");
                 }
+            }
+
+            if long_enough_since_startup && !self.has_enabled_focus_tracking {
+                self.has_enabled_focus_tracking = true;
+                let set_mode =
+                    |code| Csi::Mode(DecMode::SetDecPrivateMode(DecPrivateMode::Code(code)));
+                let _ = crate::flush_stdout!("{}", set_mode(DecPrivateModeCode::FocusTracking));
             }
 
             if self.poll_agent() {
@@ -958,15 +999,28 @@ impl<'a> App<'a> {
                             if rows_up > 0 {
                                 use termina::OneBased;
                                 use termina::escape::csi::{Csi, Cursor};
-                                let _ = write!(
-                                    std::io::stdout(),
+                                let _ = crate::flush_stdout!(
                                     "{}{}",
                                     Csi::Cursor(Cursor::Up(rows_up as u32)),
                                     Csi::Cursor(Cursor::CharacterAbsolute(
                                         OneBased::from_zero_based(0)
                                     ))
                                 );
-                                let _ = std::io::stdout().flush();
+                            }
+
+                            // Ive noticed that zellij maintains its "is_line_wrapped" state
+                            // even when we clear and redraw the lines
+                            // This causes miscalculations of number of rows to move up because
+                            // zellij combines two lines into one when the terminal is widened
+                            // but our logic thinks those two lines are still separate.
+                            // I have found issuing delete line commands fixes it.
+                            let delete_count = (rows_up as u32 + 1).min(winsize.rows as u32);
+                            if delete_count > 0 {
+                                use termina::escape::csi::{Csi, Edit};
+                                let _ = crate::flush_stdout!(
+                                    "{}",
+                                    Csi::Edit(Edit::DeleteLine(delete_count))
+                                );
                             }
 
                             self.terminal.reset_inline_cursor();
@@ -975,12 +1029,36 @@ impl<'a> App<'a> {
                                 log::error!("Failed to clear terminal on resize: {}", e);
                             });
 
+                            let final_winsize = winsize;
+                            // Now that we have cleared it and we are at the top left as fast as possible,
+                            // we could try and coalesce a burst of resize events to stay in sync with the term.
+                            // let is_resize_event = |event: &TerminaEvent| {
+                            //     matches!(event, TerminaEvent::WindowResized(_))
+                            // };
+                            // let mut final_winsize = winsize;
+                            // while let Ok(true) = GLOBAL_EVENT_READER
+                            //     .poll(Some(Duration::from_millis(500)), is_resize_event)
+                            // {
+                            //     if let Ok(TerminaEvent::WindowResized(new_winsize)) =
+                            //         GLOBAL_EVENT_READER.read(is_resize_event)
+                            //     {
+                            //         log::debug!(
+                            //             "[Resize] Coalesced pending resize event: cols={}, rows={}",
+                            //             new_winsize.cols,
+                            //             new_winsize.rows
+                            //         );
+                            //         final_winsize = new_winsize;
+                            //     }
+                            // }
+
+                            // std::thread::sleep(Duration::from_millis(1000));
+
                             self.terminal
                                 .resize(Rect {
                                     x: 0,
                                     y: 0,
-                                    width: winsize.cols,
-                                    height: winsize.rows,
+                                    width: final_winsize.cols,
+                                    height: final_winsize.rows,
                                 })
                                 .unwrap_or_else(|e| {
                                     log::error!("Failed to resize terminal: {}", e);
@@ -996,14 +1074,15 @@ impl<'a> App<'a> {
                                     .last_contents
                                     .as_ref()
                                     .map_or(1, |c| c.contents.height())
-                                    .min(winsize.rows);
-                                let available_rows = winsize.rows.saturating_sub(viewport_top);
+                                    .min(final_winsize.rows);
+                                let available_rows =
+                                    final_winsize.rows.saturating_sub(viewport_top);
                                 log::debug!(
                                     "[Resize] CPR viewport_top={}, desired_height={}, available_rows={}, term_rows={}",
                                     viewport_top,
                                     desired_height,
                                     available_rows,
-                                    winsize.rows
+                                    final_winsize.rows
                                 );
                             } else {
                                 log::warn!("[Resize] CPR returned None for viewport_top");
@@ -2393,6 +2472,54 @@ mod tests {
                 settings::ResizeLogic::ReflowedApartFromCursor
             ),
             5
+        );
+    }
+
+    #[test]
+    fn test_compute_wrapped_rows_up_reflowed_all_whitespace_trimmed() {
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 100, 4));
+
+        let line0 = "(0 20ms) hal-itx-pc";
+        for (x, ch) in line0.chars().enumerate() {
+            let s = ch.to_string();
+            buffer[(x as u16, 0)].set_symbol(&s);
+        }
+        for x in line0.chars().count()..50 {
+            buffer[(x as u16, 0)].set_symbol(" ");
+        }
+
+        let line1 = ">";
+        for (x, ch) in line1.chars().enumerate() {
+            let s = ch.to_string();
+            buffer[(x as u16, 1)].set_symbol(&s);
+        }
+
+        assert_eq!(App::compute_line_width_from_buffer(&buffer, 0), 50);
+        assert_eq!(
+            App::compute_line_width_from_buffer_opts(&buffer, 0, true),
+            19
+        );
+
+        assert_eq!(
+            App::compute_wrapped_rows_up_from_buffer(
+                &buffer,
+                1,
+                1,
+                20,
+                settings::ResizeLogic::ReflowedAll
+            ),
+            3
+        );
+
+        assert_eq!(
+            App::compute_wrapped_rows_up_from_buffer(
+                &buffer,
+                1,
+                1,
+                20,
+                settings::ResizeLogic::ReflowedAllWhitespaceTrimmed
+            ),
+            1
         );
     }
 }
