@@ -1294,6 +1294,52 @@ pub fn get_last_command_exit_value() -> i32 {
 }
 
 #[cfg(not(test))]
+pub fn get_pipestatus() -> Option<String> {
+    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    unsafe {
+        if let Ok(var_name_cstr) = std::ffi::CString::new("PIPESTATUS") {
+            let var_ptr = crate::bash_symbols::find_variable(var_name_cstr.as_ptr());
+            if !var_ptr.is_null() {
+                let var = &*var_ptr;
+                if var.is_array() {
+                    let elements = var.get_array_elements();
+                    if !elements.is_empty() {
+                        return Some(elements.join("|"));
+                    }
+                } else if let Some(val) = var.get_value() {
+                    if !val.trim().is_empty() {
+                        return Some(val);
+                    }
+                }
+            }
+        }
+        let last_exit = crate::bash_symbols::last_command_exit_value;
+        Some(last_exit.to_string())
+    }
+}
+
+#[cfg(test)]
+pub fn get_pipestatus() -> Option<String> {
+    Some("0".to_string())
+}
+
+#[cfg(not(test))]
+pub fn check_add_history(cmd: &str) -> bool {
+    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    if let Ok(c_cmd) = std::ffi::CString::new(cmd) {
+        unsafe {
+            return crate::bash_symbols::check_add_history(c_cmd.as_ptr(), 0) != 0;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+pub fn check_add_history(_cmd: &str) -> bool {
+    true
+}
+
+#[cfg(not(test))]
 pub fn get_hostname() -> String {
     let _guard = crate::bash_symbols::BASH_LOCK.lock();
     unsafe {

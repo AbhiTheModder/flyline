@@ -488,15 +488,63 @@ pub fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
-pub fn ts_to_timeago_string_5chars(ts: u64) -> String {
-    let duration = std::time::Duration::from_secs(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .saturating_sub(ts),
-    );
+/// Dumb formatter that converts an epoch timestamp in seconds (`ts_secs`)
+/// to a fixed 5-character relative time-ago string (e.g., " now ", " 5m ", " 2d ").
+pub fn ts_to_timeago_string_5chars(ts_secs: u64) -> String {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let duration = std::time::Duration::from_secs(now_secs.saturating_sub(ts_secs));
     duration_to_5chars(duration)
+}
+
+pub fn format_history_entry_extra_info(entry: &crate::history::HistoryEntry) -> String {
+    let mut lines = Vec::new();
+
+    if let Some(cwd) = entry.cwd() {
+        lines.push(format!("Directory: {}", cwd));
+    }
+    if let Some(host) = entry.hostname() {
+        lines.push(format!("Host: {}", host));
+    }
+    if let Some(ts) = entry.timestamp {
+        if let Some(time_str) = ts.format_local_datetime() {
+            let time_ago = ts.format_timeago_5chars();
+            lines.push(format!("Time: {} ({})", time_str, time_ago.trim()));
+        } else {
+            lines.push("Time: N/A".to_string());
+        }
+    } else {
+        lines.push("Time: N/A".to_string());
+    }
+    if let Some(dur_ns) = entry.duration_ns() {
+        lines.push(format!(
+            "Duration: {}",
+            crate::history::TimestampNanos::duration_formatted(dur_ns)
+        ));
+    } else {
+        lines.push("Duration: N/A".to_string());
+    }
+    if let Some(exit) = entry.exit_status() {
+        lines.push(format!("Exit Code: {}", exit));
+    } else {
+        lines.push("Exit Code: N/A".to_string());
+    }
+    if let Some(pipe) = entry.pipestatus().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("Pipeline Status: {}", pipe));
+    } else {
+        lines.push("Pipeline Status: N/A".to_string());
+    }
+    if let Some(session) = entry.session() {
+        lines.push(format!("Session: {}", session));
+    }
+    if let Some(id) = entry.id() {
+        lines.push(format!("ID: {}", id));
+    }
+
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -507,6 +555,55 @@ mod tests {
     #[test]
     fn test_duration_to_5chars_now() {
         assert_eq!(duration_to_5chars(Duration::from_secs(0)), " now ");
+    }
+
+    #[test]
+    fn test_format_history_entry_extra_info() {
+        let mut entry = crate::history::HistoryEntry::new(
+            Some(1700000000000000000),
+            0,
+            "cargo build".to_string(),
+        );
+        let meta = entry.metadata_mut();
+        meta.id = Some("test-uuid-123".to_string());
+        meta.cwd = Some("/home/user/project".to_string());
+        meta.hostname = Some("my-laptop".to_string());
+        meta.duration_ns = Some(1500000000);
+        meta.exit_status = Some(0);
+        meta.pipestatus = Some("0".to_string());
+
+        let extra_info = super::format_history_entry_extra_info(&entry);
+        assert!(extra_info.contains("Directory: /home/user/project"));
+        assert!(extra_info.contains("Host: my-laptop"));
+        assert!(extra_info.contains("Duration: 1.50s"));
+        assert!(extra_info.contains("Exit Code: 0"));
+        assert!(extra_info.contains("Pipeline Status: 0"));
+        assert!(extra_info.contains("ID: test-uuid-123"));
+    }
+
+    #[test]
+    fn test_pipeline_history_entry_formatting() {
+        let mut entry = crate::history::HistoryEntry::new(
+            Some(1785451996774964850),
+            0,
+            "echo foo | exit 32 | echo asdf".to_string(),
+        );
+        let meta = entry.metadata_mut();
+        meta.id = Some("019fb53b-6666-70f1-a720-c242714e4a5f".to_string());
+        meta.cwd = Some("/home/hal/projects/flyline".to_string());
+        meta.hostname = Some("hal-itx-pc".to_string());
+        meta.duration_ns = Some(10000000);
+        meta.exit_status = Some(0);
+        meta.pipestatus = Some("0 32 0".to_string());
+
+        let extra_info = super::format_history_entry_extra_info(&entry);
+        assert!(extra_info.contains("Directory: /home/hal/projects/flyline"));
+        assert!(extra_info.contains("Host: hal-itx-pc"));
+        assert!(extra_info.contains("Time: 2026-07-30"));
+        assert!(extra_info.contains("Duration: 10ms"));
+        assert!(extra_info.contains("Exit Code: 0"));
+        assert!(extra_info.contains("Pipeline Status: 0 32 0"));
+        assert!(extra_info.contains("ID: 019fb53b-6666-70f1-a720-c242714e4a5f"));
     }
 
     #[test]

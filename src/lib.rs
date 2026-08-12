@@ -35,6 +35,8 @@ mod cursor;
 mod dparser;
 mod globbing;
 mod history;
+mod history_backend;
+mod history_backend_importing;
 pub mod hostnames;
 mod iter_first_last;
 mod kill_on_drop_child;
@@ -163,6 +165,14 @@ impl Flyline {
         if self.content.is_empty() || self.position >= self.content.len() {
             log::info!("---------------------- Starting app ------------------------");
 
+            if self.settings.history_backend == crate::settings::HistoryBackend::Flyline {
+                let exit_status = unsafe { bash_symbols::last_command_exit_value };
+                let pipestatus = crate::bash_funcs::get_pipestatus();
+                self.settings
+                    .history_manager
+                    .record_last_command_end(exit_status, pipestatus);
+            }
+
             unsafe {
                 if bash_symbols::job_control != 0 {
                     bash_symbols::give_terminal_to(bash_symbols::shell_pgrp, 0);
@@ -177,7 +187,6 @@ impl Flyline {
             //   sh_unset_nodelay_mode (fileno (rl_instream));	/* just in case */
             // Reset SIGCHLD to SIG_DFL so child process spawning works without ECHILD;
             // SigchldGuard restores Bash's original handler upon drop.
-
             let _sigchld_guard = SigchldGuard::new();
 
             let result = app::get_command(&mut self.settings);
@@ -205,6 +214,18 @@ impl Flyline {
 
             self.content = match result {
                 app::ExitState::WithCommand(cmd) => {
+                    if self.settings.history_backend == crate::settings::HistoryBackend::Flyline {
+                        let should_add_to_history = crate::bash_funcs::check_add_history(&cmd);
+                        if should_add_to_history {
+                            let cmd_id =
+                                self.settings.history_manager.push_entry_and_jsonl_append(cmd.clone());
+                            if !cmd.trim().is_empty() {
+                                self.settings
+                                    .history_manager
+                                    .set_last_submitted_command(cmd_id, std::time::Instant::now());
+                            }
+                        }
+                    }
                     if self.settings.tutorial_step.is_active() && cmd.trim().is_empty() {
                         self.settings.tutorial_step.next();
                         log::info!(

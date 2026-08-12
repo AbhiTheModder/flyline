@@ -17,8 +17,8 @@ pub const SEVAL_NOTIFY: c_int = 0x800;
 #[repr(C)]
 #[allow(dead_code)]
 pub struct WordDesc {
-    pub word: *const c_char, // Zero terminated string.
-    pub flags: c_int,        // Flags associated with this word.
+    pub word: *mut c_char, // Zero terminated string.
+    pub flags: c_int,      // Flags associated with this word.
 }
 
 /* A linked list of words. */
@@ -29,8 +29,8 @@ pub struct WordDesc {
 #[repr(C)]
 #[allow(dead_code)]
 pub struct WordList {
-    pub next: *const WordList,
-    pub word: *const WordDesc,
+    pub next: *mut WordList,
+    pub word: *mut WordDesc,
 }
 
 pub type BashBuiltinCallFunc = extern "C" fn(*const WordList) -> c_int;
@@ -377,6 +377,13 @@ unsafe extern "C" {
     // SHELL_VAR * find_variable (const char *name)
     pub fn find_variable(name: *const c_char) -> *mut ShellVar;
 
+    // array.h / subst.c
+    // WORD_LIST * array_to_word_list (ARRAY *a)
+    pub fn array_to_word_list(array: *mut libc::c_void) -> *mut WordList;
+
+    // dispose_words (WORD_LIST *list)
+    pub fn dispose_words(list: *mut WordList);
+
     /* Bind a variable NAME to VALUE.  This conses up the name
     and value strings.  If we have a temporary environment, we bind there
     first, then we bind into shell_variables. */
@@ -456,6 +463,10 @@ unsafe extern "C" {
 
     // extern int show_var_attributes (SHELL_VAR *, int, int);
     pub fn show_var_attributes(var: *mut ShellVar, flags: c_int, output_fd: c_int) -> c_int;
+
+    // bashhist.h
+    // int check_add_history (char *line, int force)
+    pub fn check_add_history(line: *const c_char, force: c_int) -> c_int;
 }
 
 pub(crate) static BASH_LOCK: parking_lot::ReentrantMutex<()> = parking_lot::ReentrantMutex::new(());
@@ -497,6 +508,25 @@ pub struct HistoryEntry {
     pub timestamp: *mut c_char,
     pub data: HistdataT,
 }
+
+// DO NOT USE: BashArray and BashArrayElement definitions vary across different Bash builds/versions.
+// Use array_to_word_list / dispose_words via ShellVar::get_array_elements() instead.
+//
+// pub type ArrayindT = libc::intmax_t;
+// #[repr(C)]
+// pub struct BashArrayElement {
+//     pub ind: ArrayindT,
+//     pub value: *mut c_char,
+//     pub next: *mut BashArrayElement,
+//     pub prev: *mut BashArrayElement,
+// }
+// #[repr(C)]
+// pub struct BashArray {
+//     pub max_index: ArrayindT,
+//     pub num_elements: ArrayindT,
+//     pub head: *mut BashArrayElement,
+//     pub lastref: *mut BashArrayElement,
+// }
 
 // pcomplete.h
 #[repr(C)]
@@ -554,6 +584,30 @@ pub struct ShellVar {
 }
 
 impl ShellVar {
+    pub fn get_array_elements(&self) -> Vec<String> {
+        if !self.is_array() || self.value.is_null() {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        unsafe {
+            let wl_ptr = array_to_word_list(self.value as *mut libc::c_void);
+            if wl_ptr.is_null() {
+                return result;
+            }
+            let mut curr = wl_ptr;
+            while !curr.is_null() {
+                let word_desc = (*curr).word;
+                if !word_desc.is_null() && !(*word_desc).word.is_null() {
+                    let val_cstr = std::ffi::CStr::from_ptr((*word_desc).word);
+                    result.push(val_cstr.to_string_lossy().into_owned());
+                }
+                curr = (*curr).next;
+            }
+            dispose_words(wl_ptr);
+        }
+        result
+    }
+
     pub fn get_value(&self) -> Option<String> {
         if self.value.is_null() {
             None

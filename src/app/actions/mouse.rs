@@ -1,7 +1,7 @@
 use crate::app::actions::{ContextExpr, ContextLiteral, KeyEventAction};
 use crate::app::{App, AppRunningState, ContentMode, ExitState, FlycompPromptSelection};
 use crate::content_builder::Tag;
-use crate::mouse_state::{ClickCount, MouseState, PointerShape, mouse_state};
+use crate::mouse_state::{ClickCount, PointerShape, mouse_state};
 use crate::settings::MouseMode;
 use std::sync::LazyLock;
 use termina::event::{
@@ -967,7 +967,8 @@ impl MouseEventAction {
                         active_suggestions.set_selected_by_idx(idx);
                     }
                 }
-                MouseActionOutput::dont_update()
+                // Noticeably smooth if we update_now
+                MouseActionOutput::update_now()
             }
             MouseEventAction::HoverHistoryResult => {
                 if let Some(Tag::HistoryResult(idx)) = clicked_tag {
@@ -976,7 +977,8 @@ impl MouseEventAction {
                             .fuzzy_search_set_idx(Some(idx));
                     }
                 }
-                MouseActionOutput::dont_update()
+                // Noticeably smooth if we update_now
+                MouseActionOutput::update_now()
             }
             MouseEventAction::HoverAiResult => {
                 if let Some(Tag::AiResult(idx)) = clicked_tag {
@@ -1369,11 +1371,12 @@ impl MouseEventAction {
                             ContentMode::FuzzyHistorySearch(s) => Some(s),
                             _ => None,
                         };
-                        let text_opt = source.and_then(|s| {
+                        source.and_then(|s| {
                             let manager = app.select_fuzzy_history_manager(&s);
-                            manager.fuzzy_search_command_by_idx(idx)
-                        });
-                        text_opt.map(crate::app::RightClickCopyTarget::HistoryEntry)
+                            let cmd = manager.fuzzy_search_command_by_idx(idx)?;
+                            let entry = manager.fuzzy_search_entry_by_idx(idx).cloned();
+                            Some(crate::app::RightClickCopyTarget::HistoryEntry(cmd, entry))
+                        })
                     }
                     Some(Tag::PromptCwdWidget(idx)) => app
                         .prompt_manager

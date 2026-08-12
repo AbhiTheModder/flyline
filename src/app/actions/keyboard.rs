@@ -34,6 +34,8 @@ pub enum KeyEventAction {
     InlineSuggestionAccept,
     #[strum(message = "Temporarily dismiss the inline history suggestion")]
     InlineSuggestionDismiss,
+    #[strum(message = "Dismiss the right click menu popup if open")]
+    DismissRightClickMenu,
     #[strum(message = "Move down in agent output selection")]
     AgentOutputSelectNext,
     #[strum(message = "Move up in agent output selection")]
@@ -268,6 +270,10 @@ impl KeyEventAction {
             KeyEventAction::InlineSuggestionDismiss => {
                 app.dismissed_inline_suggestion_buffer = Some(app.buffer.buffer().to_string());
                 app.inline_history_suggestion = None;
+            }
+            KeyEventAction::DismissRightClickMenu => {
+                app.right_click_popup_pos = None;
+                app.right_click_copy_target = None;
             }
             KeyEventAction::AgentOutputSelectNext => {
                 if let ContentMode::AgentOutputSelection(selection) = &mut app.content_mode {
@@ -527,7 +533,11 @@ impl KeyEventAction {
                 app.try_submit_current_buffer();
             }
             KeyEventAction::RunFuzzyHistorySearch => {
-                app.history_manager
+                if app.settings.history_backend == crate::settings::HistoryBackend::Flyline {
+                    app.settings.history_manager.refresh_jsonl_backend();
+                }
+                app.settings
+                    .history_manager
                     .warm_fuzzy_search_cache(app.buffer.buffer(), Some(0));
                 app.content_mode =
                     ContentMode::FuzzyHistorySearch(FuzzyHistorySource::PastCommands);
@@ -641,6 +651,7 @@ impl KeyEventAction {
                 app.buffer_before_history_navigation
                     .get_or_insert_with(|| app.buffer.buffer().to_string());
                 if let Some(entry) = app
+                    .settings
                     .history_manager
                     .search_in_history(app.buffer.buffer(), HistorySearchDirection::Backward)
                 {
@@ -650,6 +661,7 @@ impl KeyEventAction {
             KeyEventAction::NextHistoryEntry => {
                 app.buffer.clear_selection();
                 match app
+                    .settings
                     .history_manager
                     .search_in_history(app.buffer.buffer(), HistorySearchDirection::Forward)
                 {
@@ -735,7 +747,7 @@ impl KeyEventAction {
                         .map(|target| match target {
                             crate::app::RightClickCopyTarget::Selection(s) => s.clone(),
                             crate::app::RightClickCopyTarget::Buffer(s) => s.clone(),
-                            crate::app::RightClickCopyTarget::HistoryEntry(s) => s.clone(),
+                            crate::app::RightClickCopyTarget::HistoryEntry(s, _) => s.clone(),
                             crate::app::RightClickCopyTarget::Cwd(s) => s.clone(),
                             crate::app::RightClickCopyTarget::Suggestion(s) => s.clone(),
                             crate::app::RightClickCopyTarget::AiResult(s) => s.clone(),
@@ -821,6 +833,7 @@ impl KeyEventAction {
 
                 // Get the last word of the history command we are currently looking at
                 let last_word_of_current_history_cmd = app
+                    .settings
                     .history_manager
                     .get_last_word_insert_command()
                     .and_then(|cmd| crate::history::get_last_word(cmd));
@@ -833,11 +846,11 @@ impl KeyEventAction {
                 let is_continuation = target_sub.is_some();
 
                 if !is_continuation {
-                    app.history_manager.last_word_insert_reset();
+                    app.settings.history_manager.last_word_insert_reset();
                 }
 
                 // Move to the previous command with non-empty words
-                if let Some(cmd) = app.history_manager.last_word_insert_move_prev() {
+                if let Some(cmd) = app.settings.history_manager.last_word_insert_move_prev() {
                     if let Some(w) = crate::history::get_last_word(cmd) {
                         if let Some(sub) = &target_sub {
                             let _ = app.buffer.replace_word_under_cursor(&w, sub);
@@ -1972,6 +1985,12 @@ pub static DEFAULT_BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
     use KeyCode as KC;
     use KeyModifiers as M;
     vec![
+        // --- RightClickMenuOpen bindings ---
+        Binding::new(
+            &[KC::Escape.into()],
+            ContextVar::RightClickMenuOpen.into(),
+            &[KeyEventAction::DismissRightClickMenu],
+        ),
         // --- TabCompletionAskForFlycomp bindings ---
         Binding::new(
             &expand_variations![
@@ -3188,9 +3207,6 @@ impl<'a> App<'a> {
         let _timer = crate::perf::PerfTimer::start("handle_key_event");
         let initial_leader_time = self.leader_key_active_at;
         log::trace!("Key event: {:?}", key);
-        self.right_click_popup_pos = None;
-        self.right_click_copy_target = None;
-
         let key = apply_remappings(key, &self.settings.key_remappings);
         log::trace!("Key event after remapping: {:?}", key);
 
@@ -3198,6 +3214,9 @@ impl<'a> App<'a> {
         // condition runs at most once per key press regardless of how many
         // bindings reference it.
         let context_values = ContextValues::evaluate(self);
+
+        self.right_click_popup_pos = None;
+        self.right_click_copy_target = None;
 
         // Find the highest-priority binding whose context is satisfied and
         // matches the key event. User bindings take priority over default bindings.
@@ -4219,6 +4238,8 @@ pub(crate) enum ContextVar {
     AgentOutputEntrySelected,
     #[strum(message = "The leader key is currently active")]
     LeaderKeyActive,
+    #[strum(message = "Right click menu popup is currently open")]
+    RightClickMenuOpen,
 }
 
 impl ContextVar {
@@ -4361,6 +4382,7 @@ impl ContextVar {
             ContextVar::LeaderKeyActive => app.leader_key_active_at.map_or(false, |t| {
                 t.elapsed() < std::time::Duration::from_millis(1000)
             }),
+            ContextVar::RightClickMenuOpen => app.right_click_popup_pos.is_some(),
         }
     }
 }

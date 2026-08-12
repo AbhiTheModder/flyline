@@ -25,7 +25,7 @@ pub struct LastMouseEvent {
 pub enum RightClickCopyTarget {
     Selection(String),
     Buffer(String),
-    HistoryEntry(String),
+    HistoryEntry(String, Option<crate::history::HistoryEntry>),
     Cwd(String),
     Suggestion(String),
     AiResult(String),
@@ -336,8 +336,6 @@ pub(crate) struct App<'a> {
     pub(super) term_has_focus: bool,
     pub(super) unfinished_from_prev_command: bool,
     pub(super) prompt_manager: PromptManager,
-    /// Parsed bash history available at startup.
-    pub(super) history_manager: HistoryManager,
     pub(super) buffer_before_history_navigation: Option<String>,
     pub(super) inline_history_suggestion: Option<(HistoryEntry, String)>,
     /// Buffer contents at the time the user last dismissed the inline suggestion.
@@ -382,6 +380,19 @@ impl<'a> App<'a> {
         let initial_buf_val = settings.initial_buffer.take().unwrap_or_default();
         let buffer = TextBuffer::new(&initial_buf_val);
         let formatted_buffer_cache = FormattedBuffer::default();
+
+        time_it!("startup: reload history", {
+            match settings.history_backend {
+                crate::settings::HistoryBackend::Bash => {
+                    settings
+                        .history_manager
+                        .reload_from_bash_history(settings.zsh_history_path.as_deref());
+                }
+                crate::settings::HistoryBackend::Flyline => {
+                    settings.history_manager.refresh_jsonl_backend();
+                }
+            }
+        });
 
         bash_funcs::reset_caches();
 
@@ -482,7 +493,6 @@ impl<'a> App<'a> {
                     settings.last_app_closed_at,
                 )
             ),
-            history_manager: time_it!("startup: history manager", HistoryManager::new(settings)),
             buffer_before_history_navigation: None,
             inline_history_suggestion: None,
             dismissed_inline_suggestion_buffer: None,
@@ -576,6 +586,7 @@ impl<'a> App<'a> {
     }
 
     /// Computes the display width of line `y` in `buffer` by finding the rightmost non-empty cell.
+    #[allow(dead_code)]
     pub fn compute_line_width_from_buffer(buffer: &ratatui::buffer::Buffer, y: u16) -> u16 {
         Self::compute_line_width_from_buffer_opts(buffer, y, false)
     }
@@ -706,7 +717,7 @@ impl<'a> App<'a> {
         source: &FuzzyHistorySource,
     ) -> &mut HistoryManager {
         match source {
-            FuzzyHistorySource::PastCommands => &mut self.history_manager,
+            FuzzyHistorySource::PastCommands => &mut self.settings.history_manager,
             FuzzyHistorySource::CancelledCommands => {
                 &mut self.settings.cancelled_command_history_manager
             }
@@ -720,7 +731,7 @@ impl<'a> App<'a> {
         source: &FuzzyHistorySource,
     ) -> &HistoryManager {
         match source {
-            FuzzyHistorySource::PastCommands => &self.history_manager,
+            FuzzyHistorySource::PastCommands => &self.settings.history_manager,
             FuzzyHistorySource::CancelledCommands => {
                 &self.settings.cancelled_command_history_manager
             }
@@ -1522,7 +1533,7 @@ impl<'a> App<'a> {
             if let Some(entry) = entry {
                 self.buffer.replace_buffer(&entry.command);
 
-                if let Some(raw_output) = &entry.raw_output {
+                if let Some(raw_output) = entry.raw_output() {
                     match parse_ai_output(raw_output) {
                         Ok(parsed) => {
                             self.content_mode =
@@ -1539,7 +1550,7 @@ impl<'a> App<'a> {
                                 Some(self.buffer.buffer().to_string());
                             self.content_mode = ContentMode::AgentError {
                                 message: format!("Failed to parse cached AI output: {}", e),
-                                raw_output: raw_output.clone(),
+                                raw_output: raw_output.to_string(),
                                 suggested_setup_command: None,
                             };
                             return;
@@ -2282,7 +2293,8 @@ impl<'a> App<'a> {
         {
             None
         } else {
-            self.history_manager
+            self.settings
+                .history_manager
                 .get_command_suggestion_suffix(history_buffer)
         };
 

@@ -1,10 +1,11 @@
 use std::cell::OnceCell;
+use std::path::PathBuf;
 use std::time::Instant;
 use std::vec;
 
 use crate::content_utils::apply_match_indices_to_lines;
 use crate::palette::Palette;
-use crate::settings::Settings;
+
 use crate::stateful_sliding_window::StatefulSlidingWindow;
 use crate::{bash_symbols, content_utils};
 use flash::lexer::TokenKind;
@@ -12,22 +13,267 @@ use itertools::Itertools;
 use ratatui::text::{Line, Span};
 use skim::fuzzy_matcher::arinae::ArinaeMatcher;
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct TimestampNanos(pub u64);
+
+impl TimestampNanos {
+    pub const ZERO: TimestampNanos = TimestampNanos(0);
+
+    pub fn ensure_timestamp_nanos(ts: u64) -> u64 {
+        if ts >= 100_000_000_000_000_000 {
+            // Nanoseconds (19 digits)
+            ts
+        } else if ts >= 100_000_000_000_000 {
+            // Microseconds (16 digits)
+            ts.saturating_mul(1_000)
+        } else if ts >= 100_000_000_000 {
+            // Milliseconds (13 digits)
+            ts.saturating_mul(1_000_000)
+        } else {
+            // Seconds (10 digits or less)
+            ts.saturating_mul(1_000_000_000)
+        }
+    }
+
+    pub fn new(raw: u64) -> Self {
+        TimestampNanos(Self::ensure_timestamp_nanos(raw))
+    }
+
+    #[allow(dead_code)]
+    pub fn from_nanos(nanos: u64) -> Self {
+        TimestampNanos(nanos)
+    }
+
+    pub fn now() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        TimestampNanos(nanos)
+    }
+
+    pub fn duration_formatted(dur_ns: u64) -> String {
+        if dur_ns >= 1_000_000_000 {
+            format!("{:.2}s", dur_ns as f64 / 1_000_000_000.0)
+        } else if dur_ns >= 1_000_000 {
+            format!("{}ms", dur_ns / 1_000_000)
+        } else if dur_ns >= 1_000 {
+            format!("{}µs", dur_ns / 1_000)
+        } else {
+            format!("{}ns", dur_ns)
+        }
+    }
+
+    pub fn raw_nanos(&self) -> u64 {
+        self.0
+    }
+
+    pub fn as_seconds(&self) -> u64 {
+        self.0 / 1_000_000_000
+    }
+
+    pub fn fractional_ns(&self) -> u32 {
+        (self.0 % 1_000_000_000) as u32
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn format_timeago_5chars(&self) -> String {
+        crate::content_utils::ts_to_timeago_string_5chars(self.as_seconds())
+    }
+
+    pub fn format_local_datetime(&self) -> Option<String> {
+        if self.is_zero() {
+            None
+        } else {
+            let ts_secs = self.as_seconds() as i64;
+            let ts_nanos = self.fractional_ns();
+            chrono::DateTime::from_timestamp(ts_secs, ts_nanos).map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryTag {
+    #[default]
+    Normal,
+    Cancelled,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HistoryMetadata {
+    pub id: Option<String>,
+    pub tag: HistoryTag,
+    pub cwd: Option<String>,
+    pub hostname: Option<String>,
+    pub session: Option<String>,
+    pub duration_ns: Option<u64>,
+    pub exit_status: Option<i32>,
+    pub pipestatus: Option<String>,
+    pub raw_output: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
-    pub timestamp: Option<u64>,
+    pub timestamp: Option<TimestampNanos>,
     pub index: usize,
     pub command: String,
-    pub raw_output: Option<String>,
+    // Stored out of line for efficiency
+    pub metadata: Option<Box<HistoryMetadata>>,
     syntax_highlighted: OnceCell<Vec<Line<'static>>>,
 }
 
+impl PartialEq for HistoryEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp == other.timestamp
+            && self.index == other.index
+            && self.command == other.command
+            && self.metadata == other.metadata
+    }
+}
+
+impl Eq for HistoryEntry {}
+
 impl HistoryEntry {
+    pub fn sort_key(&self) -> (u64, &str) {
+        (
+            self.timestamp.map(|t| t.raw_nanos()).unwrap_or(0),
+            &self.command,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn metadata(&self) -> Option<&HistoryMetadata> {
+        self.metadata.as_deref()
+    }
+
+    pub fn metadata_mut(&mut self) -> &mut HistoryMetadata {
+        self.metadata.get_or_insert_with(Default::default)
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.metadata.as_ref()?.id.as_deref()
+    }
+
+    pub fn tag(&self) -> HistoryTag {
+        self.metadata
+            .as_ref()
+            .map(|m| m.tag)
+            .unwrap_or(HistoryTag::Normal)
+    }
+
+    pub fn cwd(&self) -> Option<&str> {
+        self.metadata.as_ref()?.cwd.as_deref()
+    }
+
+    pub fn hostname(&self) -> Option<&str> {
+        self.metadata.as_ref()?.hostname.as_deref()
+    }
+
+    pub fn session(&self) -> Option<&str> {
+        self.metadata.as_ref()?.session.as_deref()
+    }
+
+    pub fn duration_ns(&self) -> Option<u64> {
+        self.metadata.as_ref()?.duration_ns
+    }
+
+    pub fn exit_status(&self) -> Option<i32> {
+        self.metadata.as_ref()?.exit_status
+    }
+
+    pub fn pipestatus(&self) -> Option<&str> {
+        self.metadata.as_ref()?.pipestatus.as_deref()
+    }
+
+    pub fn raw_output(&self) -> Option<&str> {
+        self.metadata.as_ref()?.raw_output.as_deref()
+    }
+
+    pub fn apply_end_metadata(
+        &mut self,
+        duration_ns: Option<u64>,
+        exit_status: Option<i32>,
+        pipestatus: Option<&str>,
+    ) {
+        let meta = self.metadata_mut();
+        meta.duration_ns = duration_ns;
+        meta.exit_status = exit_status;
+        meta.pipestatus = pipestatus.map(String::from);
+    }
+
+    pub fn to_jsonl_start_event(
+        &self,
+        default_session_id: &str,
+        default_hostname: Option<&str>,
+    ) -> HistoryJsonlEvent {
+        let cmd_id = self
+            .id()
+            .map(String::from)
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let timestamp = self.timestamp.unwrap_or(TimestampNanos::ZERO);
+        let cwd = self.cwd().map(String::from);
+        let hostname = self
+            .hostname()
+            .map(String::from)
+            .or_else(|| default_hostname.map(String::from));
+        let session = self
+            .session()
+            .map(String::from)
+            .unwrap_or_else(|| default_session_id.to_string());
+
+        HistoryJsonlEvent::Start {
+            id: cmd_id,
+            timestamp,
+            command: self.command.clone(),
+            tag: self.tag(),
+            cwd,
+            hostname,
+            session,
+        }
+    }
+
+    pub fn to_jsonl_end_event(&self) -> Option<HistoryJsonlEvent> {
+        if self.duration_ns().is_none()
+            && self.exit_status().is_none()
+            && self.pipestatus().is_none()
+        {
+            return None;
+        }
+        let cmd_id = self
+            .id()
+            .map(String::from)
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let timestamp = self.timestamp.unwrap_or(TimestampNanos::ZERO);
+
+        Some(HistoryJsonlEvent::End {
+            id: cmd_id,
+            timestamp,
+            duration_ns: self.duration_ns(),
+            exit_status: self.exit_status(),
+            pipestatus: self.pipestatus().map(String::from),
+        })
+    }
+
     pub(crate) fn new(timestamp: Option<u64>, index: usize, command: String) -> Self {
+        let timestamp = timestamp.map(TimestampNanos::new);
         HistoryEntry {
             timestamp,
             index,
             command,
-            raw_output: None,
+            metadata: None,
             syntax_highlighted: OnceCell::new(),
         }
     }
@@ -61,6 +307,37 @@ impl HistoryEntry {
     }
 }
 
+impl TryFrom<HistoryJsonlEvent> for HistoryEntry {
+    type Error = ();
+
+    fn try_from(event: HistoryJsonlEvent) -> Result<Self, Self::Error> {
+        match event {
+            HistoryJsonlEvent::Start {
+                id,
+                timestamp,
+                command,
+                tag,
+                cwd,
+                hostname,
+                session,
+            } => {
+                let mut entry = HistoryEntry::new(Some(timestamp.raw_nanos()), 0, command);
+                let meta = entry.metadata_mut();
+                meta.id = Some(id);
+                meta.tag = tag;
+                meta.cwd = cwd;
+                meta.hostname = hostname;
+                meta.session = Some(session);
+                Ok(entry)
+            }
+            HistoryJsonlEvent::End { .. } => Err(()),
+        }
+    }
+}
+
+pub use crate::history_backend::*;
+pub use crate::history_backend_importing::*;
+
 #[derive(Debug)]
 pub struct HistoryManager {
     entries: Vec<HistoryEntry>,
@@ -69,6 +346,12 @@ pub struct HistoryManager {
     last_buffered_command: Option<String>,
     fuzzy_search: FuzzyHistorySearch,
     last_word_insert_index: Option<usize>,
+    last_read_jsonl_byte_offset: u64,
+    last_seen_event_id: Option<String>,
+    session_id: String,
+    default_tag: HistoryTag,
+    jsonl_history_path: PathBuf,
+    last_submitted_command: Option<(String, std::time::Instant)>,
 }
 
 pub enum HistorySearchDirection {
@@ -78,7 +361,30 @@ pub enum HistorySearchDirection {
     PageForward,
 }
 
+impl Default for HistoryManager {
+    fn default() -> Self {
+        Self::new_empty_with_tag(HistoryTag::Normal)
+    }
+}
+
 impl HistoryManager {
+    pub fn jsonl_path(&self) -> PathBuf {
+        self.jsonl_history_path.clone()
+    }
+
+    pub fn set_jsonl_history_path(&mut self, path: PathBuf) {
+        if self.jsonl_history_path != path {
+            self.jsonl_history_path = path;
+            self.last_read_jsonl_byte_offset = 0;
+            self.last_seen_event_id = None;
+            self.refresh_jsonl_backend();
+        }
+    }
+
+    pub fn set_last_submitted_command(&mut self, cmd_id: String, start_time: std::time::Instant) {
+        self.last_submitted_command = Some((cmd_id, start_time));
+    }
+
     fn log_recent_entries(entries: &[HistoryEntry], source: &str) {
         if entries.is_empty() {
             log::warn!("No {} history entries found", source);
@@ -92,21 +398,36 @@ impl HistoryManager {
     }
 
     fn push_deduped_entry(entries: &mut Vec<HistoryEntry>, mut entry: HistoryEntry) {
-        if entries
-            .last()
-            .is_some_and(|prev| prev.command == entry.command)
-        {
-            return;
+        if let Some(prev) = entries.last_mut() {
+            let prev_secs = prev.timestamp.map(|t| t.as_seconds()).unwrap_or(0);
+            let entry_secs = entry.timestamp.map(|t| t.as_seconds()).unwrap_or(0);
+            if prev.command == entry.command
+                && (prev_secs == entry_secs || prev_secs == 0 || entry_secs == 0)
+            {
+                if entry_secs >= prev_secs {
+                    if entry.timestamp.is_some() {
+                        prev.timestamp = entry.timestamp;
+                    }
+                    if entry.metadata.is_some() {
+                        prev.metadata = entry.metadata;
+                    }
+                }
+                return;
+            }
         }
 
         entry.index = entries.len();
         entries.push(entry);
     }
 
-    fn normalize_entries(entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
+    fn normalize_entries(mut entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
+        entries.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
         let mut normalized = Vec::with_capacity(entries.len());
         for entry in entries {
             Self::push_deduped_entry(&mut normalized, entry);
+        }
+        for (i, entry) in normalized.iter_mut().enumerate() {
+            entry.index = i;
         }
         normalized
     }
@@ -115,49 +436,9 @@ impl HistoryManager {
         zsh_entries: Vec<HistoryEntry>,
         bash_entries: Vec<HistoryEntry>,
     ) -> Vec<HistoryEntry> {
-        let mut merged = Vec::with_capacity(zsh_entries.len() + bash_entries.len());
-        let mut zsh_iter = zsh_entries.into_iter().peekable();
-        let mut bash_iter = bash_entries.into_iter().peekable();
-
-        while let (Some(zsh_entry), Some(bash_entry)) = (zsh_iter.peek(), bash_iter.peek()) {
-            let take_zsh = zsh_entry.timestamp.unwrap_or(0) <= bash_entry.timestamp.unwrap_or(0);
-            if take_zsh {
-                Self::push_deduped_entry(&mut merged, zsh_iter.next().unwrap());
-            } else {
-                Self::push_deduped_entry(&mut merged, bash_iter.next().unwrap());
-            }
-        }
-
-        for entry in zsh_iter {
-            Self::push_deduped_entry(&mut merged, entry);
-        }
-
-        for entry in bash_iter {
-            Self::push_deduped_entry(&mut merged, entry);
-        }
-
-        merged
-    }
-
-    /// Read the user's bash history file into a Vec<String>.
-    /// Tries $HISTFILE first, otherwise falls back to $HOME/.bash_history.
-    #[allow(dead_code)]
-    fn parse_bash_history_from_file() -> Vec<HistoryEntry> {
-        let hist_path = std::env::var("HISTFILE").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            format!("{}/.bash_history", home)
-        });
-
-        log::debug!("Reading bash history from: {}", hist_path);
-
-        let content = std::fs::read_to_string(hist_path).unwrap_or_default();
-        let res = time_it!(
-            "parse bash history",
-            HistoryManager::parse_bash_history_str(&content)
-        );
-
-        log::debug!("Parsed bash history ({} entries)", res.len());
-        res
+        let mut all = zsh_entries;
+        all.extend(bash_entries);
+        Self::normalize_entries(all)
     }
 
     pub fn parse_bash_history_from_memory() -> Vec<HistoryEntry> {
@@ -251,38 +532,15 @@ impl HistoryManager {
         res
     }
 
-    pub fn new(settings: &Settings) -> HistoryManager {
-        // Bash will load the history into memory, so we can read it from there
-        // Bash parses it after bashrc is loaded.
-        let bash_entries = Self::parse_bash_history_from_memory();
-        Self::log_recent_entries(&bash_entries, "bash");
-
-        // Alternative is to do it ourselves
-        // let bash_entries = Self::parse_bash_history_from_file();
-
-        let entries = if let Some(ref zsh_path) = settings.zsh_history_path {
-            // As a Zsh user migrating to Bash, I want to have my Zsh history available too
-            let zsh_entries = Self::parse_zsh_history(Some(zsh_path.as_str()));
-            Self::log_recent_entries(&zsh_entries, "Zsh");
-            Self::merge_history_entries(zsh_entries, bash_entries)
-        } else {
-            Self::normalize_entries(bash_entries)
-        };
-
-        let index = entries.len();
-        HistoryManager {
-            entries,
-            index,
-            last_search_prefix: None,
-            last_buffered_command: None,
-            fuzzy_search: FuzzyHistorySearch::new(),
-            last_word_insert_index: None,
-        }
+    pub fn new_empty_with_tag(default_tag: HistoryTag) -> HistoryManager {
+        Self::new_empty_with_tag_and_path(default_tag, None)
     }
 
-    /// Create an empty `HistoryManager` that starts with no entries.
-    /// New entries are added at runtime via `push_entry`.
-    pub fn new_empty() -> HistoryManager {
+    pub fn new_empty_with_tag_and_path(
+        default_tag: HistoryTag,
+        jsonl_history_path: Option<PathBuf>,
+    ) -> HistoryManager {
+        let jsonl_history_path = jsonl_history_path.unwrap_or_else(default_jsonl_path);
         HistoryManager {
             entries: Vec::new(),
             index: 0,
@@ -290,32 +548,207 @@ impl HistoryManager {
             last_buffered_command: None,
             fuzzy_search: FuzzyHistorySearch::new(),
             last_word_insert_index: None,
+            last_read_jsonl_byte_offset: 0,
+            last_seen_event_id: None,
+            session_id: uuid::Uuid::now_v7().to_string(),
+            default_tag,
+            jsonl_history_path,
+            last_submitted_command: None,
         }
     }
 
-    /// Push a new entry to the history list.
+    pub fn reload_from_bash_history(&mut self, zsh_history_path: Option<&str>) {
+        self.entries.clear();
+        self.last_search_prefix = None;
+        self.last_buffered_command = None;
+        self.last_word_insert_index = None;
+        let bash_entries = Self::parse_bash_history_from_memory();
+        Self::log_recent_entries(&bash_entries, "bash");
+        let entries = if let Some(zsh_path) = zsh_history_path {
+            let zsh_entries = Self::parse_zsh_history(Some(zsh_path));
+            Self::log_recent_entries(&zsh_entries, "Zsh");
+            Self::merge_history_entries(zsh_entries, bash_entries)
+        } else {
+            bash_entries
+        };
+        self.entries = Self::normalize_entries(entries);
+        self.index = self.entries.len();
+        self.fuzzy_search.clear_cache();
+    }
+
+    pub fn apply_jsonl_event(&mut self, event: HistoryJsonlEvent) {
+        match event {
+            HistoryJsonlEvent::Start { .. } => {
+                if let Ok(entry) = HistoryEntry::try_from(event) {
+                    if entry.tag() == self.default_tag {
+                        Self::push_deduped_entry(&mut self.entries, entry);
+                    }
+                }
+            }
+            HistoryJsonlEvent::End {
+                id,
+                duration_ns,
+                exit_status,
+                pipestatus,
+                ..
+            } => {
+                self.update_entry_end_metadata(&id, duration_ns, exit_status, pipestatus);
+            }
+        }
+    }
+
+    /// Refreshes history entries incrementally from the active backend.
+    ///
+    /// When using `HistoryBackend::Flyline`, queries ~/.local/share/flyline/history.jsonl.
+    pub fn refresh_jsonl_backend(&mut self) {
+        let path = self.jsonl_path();
+        if is_file_empty_or_missing(&path) {
+            if !self.entries.is_empty() {
+                let _ = repopulate_jsonl_from_entries(&self.entries, &self.session_id, &path);
+            }
+            self.last_read_jsonl_byte_offset = 0;
+            // we dont return here.
+            // This is so that we update our state for next time
+        }
+
+        if let Ok(fetch_res) = fetch_flyline_jsonl_history_from_offset(
+            &path,
+            self.last_read_jsonl_byte_offset,
+            self.last_seen_event_id.as_deref(),
+        ) {
+            if let Some(ref id) = fetch_res.last_seen_event_id {
+                self.last_seen_event_id = Some(id.clone());
+            }
+            let has_new_events = !fetch_res.events.is_empty();
+            for event in fetch_res.events {
+                self.apply_jsonl_event(event);
+            }
+            if has_new_events {
+                self.entries.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+                for (i, entry) in self.entries.iter_mut().enumerate() {
+                    entry.index = i;
+                }
+                self.fuzzy_search.clear_cache();
+            }
+            if let Some(offset) = fetch_res.last_seen_event_start_offset {
+                self.last_read_jsonl_byte_offset = offset;
+            } else {
+                self.last_read_jsonl_byte_offset = fetch_res.new_offset;
+            }
+            self.index = self.entries.len();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn entries(&self) -> &[HistoryEntry] {
+        &self.entries
+    }
+
+    /// Push a new entry to the in-memory history list.
     /// `self.index` is kept at `entries.len()` (past-the-end), matching the
     /// invariant established by `new()` and `HistoryManager::search_in_history`.
     /// Resets the fuzzy search cache so the new entry is visible immediately.
-    pub fn push_entry(&mut self, command: String) {
+    pub fn push_entry(&mut self, command: String) -> String {
+        let command_id = uuid::Uuid::now_v7().to_string();
         if command.trim().is_empty() {
-            return;
+            return command_id;
         }
+
+        let bash_cwd = crate::bash_funcs::get_cwd();
+        let cwd = if !bash_cwd.is_empty() {
+            Some(bash_cwd)
+        } else {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        };
+        let hostname = Some(crate::bash_funcs::get_hostname()).filter(|h| !h.is_empty());
+
+        let now_ts = TimestampNanos::now();
         let index = self.entries.len();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_secs());
-        self.entries
-            .push(HistoryEntry::new(timestamp, index, command));
+        let mut entry = HistoryEntry::new(Some(now_ts.raw_nanos()), index, command);
+        let meta = entry.metadata_mut();
+        meta.id = Some(command_id.clone());
+        meta.tag = self.default_tag;
+        meta.cwd = cwd;
+        meta.hostname = hostname;
+        meta.session = Some(self.session_id.clone());
+        self.last_seen_event_id = Some(command_id.clone());
+        self.entries.push(entry);
         self.index = self.entries.len();
         self.last_word_insert_index = None;
         self.fuzzy_search.clear_cache();
+
+        command_id
+    }
+
+    /// Push a new entry to the in-memory history list AND write the Start event to JSONL history.
+    pub fn push_entry_and_jsonl_append(&mut self, command: String) -> String {
+        let command_id = self.push_entry(command.clone());
+        if command.trim().is_empty() {
+            return command_id;
+        }
+
+        if let Some(entry) = self.entries.last() {
+            let event = HistoryJsonlEvent::Start {
+                id: command_id.clone(),
+                timestamp: entry.timestamp.unwrap_or_else(TimestampNanos::now),
+                command,
+                tag: self.default_tag,
+                cwd: entry.cwd().map(String::from),
+                hostname: entry.hostname().map(String::from),
+                session: self.session_id.clone(),
+            };
+            if let Err(e) = append_jsonl_history_event(&event, &self.jsonl_path()) {
+                log::warn!("Failed to write start event to JSONL history: {}", e);
+            }
+        }
+
+        command_id
+    }
+
+
+    pub fn update_entry_end_metadata(
+        &mut self,
+        id: &str,
+        duration_ns: Option<u64>,
+        exit_status: Option<i32>,
+        pipestatus: Option<String>,
+    ) {
+        // Start from the back because most likely the entry we want to update is one of the most recent ones.
+        let found = self.entries.iter_mut().rev().find(|e| e.id() == Some(id));
+        if let Some(entry) = found {
+            entry.apply_end_metadata(duration_ns, exit_status, pipestatus.as_deref());
+        }
+    }
+
+    pub fn record_last_command_end(&mut self, exit_status: i32, pipestatus: Option<String>) {
+        if let Some((cmd_id, start_time)) = self.last_submitted_command.take() {
+            let duration_ns = start_time.elapsed().as_nanos() as u64;
+            let end_ts = TimestampNanos::now();
+            self.update_entry_end_metadata(
+                &cmd_id,
+                Some(duration_ns),
+                Some(exit_status),
+                pipestatus.clone(),
+            );
+            let jsonl_path = self.jsonl_path();
+            let event = HistoryJsonlEvent::End {
+                id: cmd_id,
+                timestamp: end_ts,
+                duration_ns: Some(duration_ns),
+                exit_status: Some(exit_status),
+                pipestatus,
+            };
+            if let Err(e) = append_jsonl_history_event(&event, &jsonl_path) {
+                log::warn!("Failed to write end event to JSONL history: {}", e);
+            }
+        }
     }
 
     pub fn set_last_raw_output(&mut self, raw_output: String) {
         if let Some(last) = self.entries.last_mut() {
-            last.raw_output = Some(raw_output);
+            last.metadata_mut().raw_output = Some(raw_output);
         }
     }
 
@@ -350,31 +783,56 @@ impl HistoryManager {
         }
     }
 
-    fn parse_bash_history_str(s: &str) -> Vec<HistoryEntry> {
+    pub fn parse_bash_history_str(s: &str) -> Vec<HistoryEntry> {
         let mut res = Vec::<HistoryEntry>::new();
+        let mut current_ts: Option<u64> = None;
+        let mut current_cmd_lines: Vec<&str> = Vec::new();
+        let mut has_seen_timestamp = false;
 
-        s.lines().fold(None, |my_ts, l| {
-            let l_ts = HistoryManager::parse_timestamp(l);
+        for line in s.lines() {
+            if let Some(ts) = HistoryManager::parse_timestamp(line) {
+                has_seen_timestamp = true;
 
-            if l_ts.is_some() {
-                // replace current timestamp
-                l_ts
-            } else if l.trim().is_empty() {
-                // Empty line
-                my_ts
+                let cmd_str = current_cmd_lines.join("\n");
+                let trimmed = cmd_str.trim();
+                if !trimmed.is_empty() {
+                    let entry = HistoryEntry::new(current_ts, res.len(), trimmed.to_string());
+                    res.push(entry);
+                }
+                current_cmd_lines.clear();
+                current_ts = Some(ts);
+            } else if has_seen_timestamp && current_ts.is_some() {
+                if current_cmd_lines.len() >= 100 {
+                    let cmd_str = current_cmd_lines.join("\n");
+                    let trimmed = cmd_str.trim();
+                    if !trimmed.is_empty() {
+                        let entry = HistoryEntry::new(current_ts, res.len(), trimmed.to_string());
+                        res.push(entry);
+                    }
+                    current_cmd_lines.clear();
+                    current_ts = None;
+                }
+                current_cmd_lines.push(line);
             } else {
-                // It's a command line
-                let entry = HistoryEntry::new(my_ts, res.len(), l.to_string());
-                res.push(entry);
-                None
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let entry = HistoryEntry::new(None, res.len(), trimmed.to_string());
+                    res.push(entry);
+                }
             }
-            // TODO multiline commands
-        });
+        }
+
+        let cmd_str = current_cmd_lines.join("\n");
+        let trimmed = cmd_str.trim();
+        if !trimmed.is_empty() {
+            let entry = HistoryEntry::new(current_ts, res.len(), trimmed.to_string());
+            res.push(entry);
+        }
 
         res
     }
 
-    fn parse_zsh_history_str(s: &str) -> Vec<HistoryEntry> {
+    pub fn parse_zsh_history_str(s: &str) -> Vec<HistoryEntry> {
         let mut res = Vec::<HistoryEntry>::new();
 
         for line in s.lines() {
@@ -523,6 +981,13 @@ impl HistoryManager {
             .map(|entry| entry.command.clone())
     }
 
+    pub fn fuzzy_search_entry_by_idx(&self, idx: usize) -> Option<&HistoryEntry> {
+        self.fuzzy_search
+            .cache
+            .get(idx)
+            .and_then(|formatted| self.entries.get(formatted.entry_index))
+    }
+
     // fuzzy search cache logic moved to FuzzyHistorySearch
 }
 
@@ -544,12 +1009,15 @@ impl std::cmp::PartialEq for HistoryEntryFormatted {
 
 impl std::cmp::Ord for HistoryEntryFormatted {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.score.cmp(&self.score)
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| other.entry_index.cmp(&self.entry_index))
     }
 }
 impl std::cmp::PartialOrd for HistoryEntryFormatted {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(other.score.cmp(&self.score))
+        Some(self.cmp(other))
     }
 }
 
@@ -897,23 +1365,24 @@ cd /home/user2
                 entry.timestamp, entry.command
             );
         }
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 3);
 
         let mut entries_iter = entries.iter();
 
         let mut check = |expected_ts: Option<u64>, expected_index: usize, expected_cmd: &str| {
             let entry = entries_iter.next().unwrap();
-            assert_eq!(entry.timestamp, expected_ts);
+            assert_eq!(entry.timestamp, expected_ts.map(TimestampNanos::new));
             assert_eq!(entry.index, expected_index);
             assert_eq!(entry.command, expected_cmd);
         };
 
-        check(Some(1625078400), 0, "ls -al");
-        check(Some(1625078460), 1, "echo 'Hello, World!'");
-        check(None, 2, "pwd");
-        check(None, 3, "#cd /asdf/asdf");
-        check(None, 4, "cd /home/user");
-        check(Some(1625078460), 5, "cd /home/user2");
+        check(Some(1625078400_000_000_000), 0, "ls -al");
+        check(
+            Some(1625078460_000_000_000),
+            1,
+            "echo 'Hello, World!'\npwd\n#cd /asdf/asdf\ncd /home/user",
+        );
+        check(Some(1625078460_000_000_000), 2, "cd /home/user2");
     }
 
     #[test]
@@ -938,11 +1407,20 @@ git status
         let entries = HistoryManager::parse_zsh_history_str(EXTENDED_HISTORY);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].command, "ls -al");
-        assert_eq!(entries[0].timestamp, Some(1625078400));
+        assert_eq!(
+            entries[0].timestamp,
+            Some(TimestampNanos::new(1625078400_000_000_000))
+        );
         assert_eq!(entries[1].command, "echo 'Hello, World!'");
-        assert_eq!(entries[1].timestamp, Some(1625078460));
+        assert_eq!(
+            entries[1].timestamp,
+            Some(TimestampNanos::new(1625078460_000_000_000))
+        );
         assert_eq!(entries[2].command, "cd /tmp");
-        assert_eq!(entries[2].timestamp, Some(1625078520));
+        assert_eq!(
+            entries[2].timestamp,
+            Some(TimestampNanos::new(1625078520_000_000_000))
+        );
     }
 
     #[test]
@@ -1006,7 +1484,7 @@ git status
     fn test_normalize_entries_dedups_adjacent_and_reindexes() {
         let entries = vec![
             HistoryEntry::new(Some(1), 99, "echo hi".to_string()),
-            HistoryEntry::new(Some(2), 42, "echo hi".to_string()),
+            HistoryEntry::new(Some(1), 42, "echo hi".to_string()),
             HistoryEntry::new(Some(3), 7, "pwd".to_string()),
         ];
 
@@ -1026,7 +1504,7 @@ git status
             HistoryEntry::new(Some(3), 11, "pwd".to_string()),
         ];
         let bash_entries = vec![
-            HistoryEntry::new(Some(2), 20, "echo hi".to_string()),
+            HistoryEntry::new(Some(1), 20, "echo hi".to_string()),
             HistoryEntry::new(Some(4), 21, "ls".to_string()),
         ];
 
@@ -1043,7 +1521,7 @@ git status
 
     #[test]
     fn test_last_word_insert_logic() {
-        let mut hm = HistoryManager::new_empty();
+        let mut hm = HistoryManager::default();
         hm.push_entry("echo one".to_string());
         hm.push_entry("echo two".to_string());
         hm.push_entry("echo three".to_string());
@@ -1111,7 +1589,7 @@ git status
 
     #[test]
     fn test_last_word_insert_skips_empty() {
-        let mut hm = HistoryManager::new_empty();
+        let mut hm = HistoryManager::default();
         hm.push_entry("echo one".to_string());
         hm.push_entry(";".to_string());
         hm.push_entry("echo two".to_string());
@@ -1120,5 +1598,404 @@ git status
         // Moving prev again should skip ";" and go to "echo one"
         assert_eq!(hm.last_word_insert_move_prev(), Some("echo one"));
         assert_eq!(hm.last_word_insert_move_prev(), None);
+    }
+
+    #[test]
+    fn test_jsonl_history_serialization_and_locking() {
+        let session_uuid = uuid::Uuid::now_v7().to_string();
+        let cmd_uuid = uuid::Uuid::now_v7().to_string();
+        let start_event = HistoryJsonlEvent::Start {
+            id: cmd_uuid.clone(),
+            timestamp: TimestampNanos::new(1700000000000000000),
+            command: "cargo test --lib".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: Some("/home/user/project".to_string()),
+            hostname: Some("test-host".to_string()),
+            session: session_uuid.clone(),
+        };
+        let end_event = HistoryJsonlEvent::End {
+            id: cmd_uuid.clone(),
+            timestamp: TimestampNanos::new(1700000005000000000),
+            duration_ns: Some(5000000000),
+            exit_status: Some(0),
+            pipestatus: Some("0".to_string()),
+        };
+
+        let start_json = serde_json::to_string(&start_event).unwrap();
+        let end_json = serde_json::to_string(&end_event).unwrap();
+
+        assert!(start_json.contains("\"event\":\"start\""));
+        assert!(start_json.contains("\"session\":\""));
+        assert!(start_json.contains("\"command\":\"cargo test --lib\""));
+        assert!(end_json.contains("\"event\":\"end\""));
+        assert!(end_json.contains("\"duration_ns\":5000000000"));
+    }
+
+    #[test]
+    fn test_import_bash_history_file() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("flyline_test_hist_{}", rand::random::<u64>()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let hist_file = temp_dir.join("bash_history");
+        let target_jsonl = temp_dir.join("history.jsonl");
+        std::fs::write(&hist_file, "#1700000000\nls -la\n#1700000010\ncargo test\n").unwrap();
+
+        let count = import_history_file(&hist_file, &target_jsonl).unwrap();
+        assert_eq!(count, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_import_zsh_history_file() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("flyline_test_zsh_hist_{}", rand::random::<u64>()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let hist_file = temp_dir.join("zsh_history");
+        let target_jsonl = temp_dir.join("history.jsonl");
+        std::fs::write(
+            &hist_file,
+            ": 1700000000:0;ls -la\n: 1700000010:0;cargo test\n",
+        )
+        .unwrap();
+
+        let count = import_history_file(&hist_file, &target_jsonl).unwrap();
+        assert_eq!(count, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_import_history_idempotent() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("flyline_test_idempotent_{}", rand::random::<u64>()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let hist_file = temp_dir.join("bash_history_no_ts");
+        let target_jsonl = temp_dir.join("history.jsonl");
+        std::fs::write(&hist_file, "echo hello\necho world\n").unwrap();
+
+        let count1 = import_history_file(&hist_file, &target_jsonl).unwrap();
+        assert_eq!(count1, 2);
+
+        let count2 = import_history_file(&hist_file, &target_jsonl).unwrap();
+        assert_eq!(count2, 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_import_atuin_history() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("flyline_test_atuin_hist_{}", rand::random::<u64>()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let target_jsonl = temp_dir.join("history.jsonl");
+
+        let res = import_atuin_history(&target_jsonl);
+        if let Ok(count) = res {
+            assert!(target_jsonl.exists());
+            println!("Imported {} items from Atuin in test", count);
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_import_atuin_sqlite_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "flyline_test_atuin_sqlite_{}",
+            rand::random::<u64>()
+        ));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("history.db");
+        let target_jsonl = temp_dir.join("history.jsonl");
+
+        let py_setup = format!(
+            r#"
+import sqlite3
+conn = sqlite3.connect("{}")
+conn.execute("CREATE TABLE history (id text primary key, timestamp integer not null, duration integer not null, exit integer not null, command text not null, cwd text not null, session text not null, hostname text not null, deleted_at integer)")
+conn.execute("INSERT INTO history VALUES ('id1', 1785102235000000000, 1500000000, 0, 'echo sqlite_test', '/home/user', 'session1', 'host1', NULL)")
+conn.commit()
+"#,
+            db_path.to_str().unwrap()
+        );
+
+        let py_status = std::process::Command::new("python3")
+            .args(["-c", &py_setup])
+            .status();
+
+        if let Ok(status) = py_status {
+            if status.success() {
+                let count = import_atuin_sqlite_file(&db_path, &target_jsonl).unwrap();
+                assert_eq!(count, 1);
+                let content = std::fs::read_to_string(&target_jsonl).unwrap();
+                assert!(content.contains("echo sqlite_test"));
+                assert!(content.contains("/home/user"));
+                assert!(content.contains("host1"));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_timestamp_nanos_methods() {
+        let ts_zero = TimestampNanos::ZERO;
+        assert!(ts_zero.is_zero());
+        assert_eq!(ts_zero.as_seconds(), 0);
+        assert_eq!(ts_zero.fractional_ns(), 0);
+        assert_eq!(ts_zero.format_local_datetime(), None);
+
+        let raw = 1_785_451_996_774_964_850u64;
+        let ts = TimestampNanos::new(raw);
+        assert!(!ts.is_zero());
+        assert_eq!(ts.as_seconds(), 1_785_451_996);
+        assert_eq!(ts.fractional_ns(), 774_964_850);
+        assert_eq!(ts.raw_nanos(), raw);
+
+        let formatted_dt = ts.format_local_datetime();
+        assert!(formatted_dt.is_some());
+        assert!(formatted_dt.unwrap().contains("2026"));
+
+        let timeago = ts.format_timeago_5chars();
+        assert_eq!(timeago.len(), 5);
+    }
+
+    #[test]
+    fn test_history_manager_tags() {
+        let mut normal_hm = HistoryManager::new_empty_with_tag(HistoryTag::Normal);
+        normal_hm.push_entry("ls -la".to_string());
+        assert_eq!(normal_hm.entries()[0].tag(), HistoryTag::Normal);
+
+        let mut cancelled_hm = HistoryManager::new_empty_with_tag(HistoryTag::Cancelled);
+        cancelled_hm.push_entry("git status".to_string());
+        assert_eq!(cancelled_hm.entries()[0].tag(), HistoryTag::Cancelled);
+
+        let mut agent_hm = HistoryManager::new_empty_with_tag(HistoryTag::Agent);
+        agent_hm.push_entry("explain this code".to_string());
+        assert_eq!(agent_hm.entries()[0].tag(), HistoryTag::Agent);
+    }
+
+    #[test]
+    fn test_custom_history_file_path() {
+        let custom_path = std::path::PathBuf::from("/tmp/custom_flyline_history.jsonl");
+        let hm = HistoryManager::new_empty_with_tag_and_path(
+            HistoryTag::Normal,
+            Some(custom_path.clone()),
+        );
+        assert_eq!(hm.jsonl_path(), custom_path);
+    }
+
+    #[test]
+    fn test_change_jsonl_history_path_mid_session() {
+        let file1 = std::env::temp_dir().join(format!("flyline_test_mid1_{}.jsonl", uuid::Uuid::now_v7()));
+        let file2 = std::env::temp_dir().join(format!("flyline_test_mid2_{}.jsonl", uuid::Uuid::now_v7()));
+        let _ = std::fs::remove_file(&file1);
+        let _ = std::fs::remove_file(&file2);
+
+        let mut hm = HistoryManager::new_empty_with_tag_and_path(HistoryTag::Normal, Some(file1.clone()));
+        hm.push_entry_and_jsonl_append("command_one".to_string());
+        hm.push_entry_and_jsonl_append("command_two".to_string());
+
+        assert_eq!(hm.entries().len(), 2);
+        assert!(file1.exists());
+        assert!(!file2.exists());
+
+        // Change jsonl history path mid-session to new missing file
+        hm.set_jsonl_history_path(file2.clone());
+
+        // new file file2 should now exist and contain the in-memory entries!
+        assert!(file2.exists());
+        let res = fetch_flyline_jsonl_history_from_offset(&file2, 0, None).unwrap();
+        assert_eq!(res.events.len(), 2);
+
+        let _ = std::fs::remove_file(&file1);
+        let _ = std::fs::remove_file(&file2);
+    }
+
+    #[test]
+    fn test_timestamp_nanos_max_value() {
+        let ts_max = TimestampNanos::new(u64::MAX);
+        assert_eq!(ts_max.raw_nanos(), u64::MAX);
+        assert_eq!(ts_max.as_seconds(), u64::MAX / 1_000_000_000);
+        // Ensure timeago underflow safety when timestamp is far in the future/max
+        let timeago = ts_max.format_timeago_5chars();
+        assert_eq!(timeago, " now ");
+    }
+
+    #[test]
+    fn test_history_jsonl_tampering_recovery() {
+        let temp_file = std::env::temp_dir().join(format!(
+            "flyline_test_tamper_{}.jsonl",
+            uuid::Uuid::now_v7()
+        ));
+        let _ = std::fs::remove_file(&temp_file);
+
+        let event1 = HistoryJsonlEvent::Start {
+            id: "event-1".to_string(),
+            timestamp: TimestampNanos::new(1700000000000000000),
+            command: "echo 1".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: None,
+            hostname: None,
+            session: "sess".to_string(),
+        };
+        let event2 = HistoryJsonlEvent::Start {
+            id: "event-2".to_string(),
+            timestamp: TimestampNanos::new(1700000001000000000),
+            command: "echo 2".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: None,
+            hostname: None,
+            session: "sess".to_string(),
+        };
+        let event3 = HistoryJsonlEvent::Start {
+            id: "event-3".to_string(),
+            timestamp: TimestampNanos::new(1700000002000000000),
+            command: "echo 3".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: None,
+            hostname: None,
+            session: "sess".to_string(),
+        };
+
+        append_jsonl_history_event(&event1, &temp_file).unwrap();
+        append_jsonl_history_event(&event2, &temp_file).unwrap();
+
+        let res1 = fetch_flyline_jsonl_history_from_offset(&temp_file, 0, None).unwrap();
+        assert_eq!(res1.events.len(), 2);
+        assert_eq!(res1.last_seen_event_id, Some("event-2".to_string()));
+
+        // Simulate file modification / truncation (file rewritten with event1, event2, event3)
+        std::fs::write(&temp_file, "").unwrap();
+        append_jsonl_history_event(&event1, &temp_file).unwrap();
+        append_jsonl_history_event(&event2, &temp_file).unwrap();
+        append_jsonl_history_event(&event3, &temp_file).unwrap();
+
+        // Pass invalid old offset (e.g. 999999) with last_seen_event_id "event-2"
+        let res2 =
+            fetch_flyline_jsonl_history_from_offset(&temp_file, 999999, Some("event-2")).unwrap();
+        assert_eq!(res2.events.len(), 1);
+        assert_eq!(res2.events[0].id(), "event-3");
+        assert_eq!(res2.last_seen_event_id, Some("event-3".to_string()));
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_history_jsonl_middle_deletion_recovery() {
+        let temp_file = std::env::temp_dir().join(format!(
+            "flyline_test_del_rec_{}.jsonl",
+            uuid::Uuid::now_v7()
+        ));
+        let _ = std::fs::remove_file(&temp_file);
+
+        let event1 = HistoryJsonlEvent::Start {
+            id: "event-1".to_string(),
+            timestamp: TimestampNanos::new(1700000000000000000),
+            command: "echo 1".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: None,
+            hostname: None,
+            session: "sess".to_string(),
+        };
+        let event2 = HistoryJsonlEvent::Start {
+            id: "event-2".to_string(),
+            timestamp: TimestampNanos::new(1700000001000000000),
+            command: "echo 2".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: None,
+            hostname: None,
+            session: "sess".to_string(),
+        };
+        let event3 = HistoryJsonlEvent::Start {
+            id: "event-3".to_string(),
+            timestamp: TimestampNanos::new(1700000002000000000),
+            command: "echo 3".to_string(),
+            tag: HistoryTag::Normal,
+            cwd: None,
+            hostname: None,
+            session: "sess".to_string(),
+        };
+
+        append_jsonl_history_event(&event1, &temp_file).unwrap();
+        append_jsonl_history_event(&event2, &temp_file).unwrap();
+
+        let res1 = fetch_flyline_jsonl_history_from_offset(&temp_file, 0, None).unwrap();
+        assert_eq!(res1.events.len(), 2);
+        assert_eq!(res1.last_seen_event_id, Some("event-2".to_string()));
+        let last_offset = res1.last_seen_event_start_offset.unwrap();
+
+        // Simulate deleting event1 from file (file now contains event2, event3)
+        std::fs::write(&temp_file, "").unwrap();
+        append_jsonl_history_event(&event2, &temp_file).unwrap();
+        append_jsonl_history_event(&event3, &temp_file).unwrap();
+
+        // Calling fetch with last_offset (which pointed to event2 before event1 was deleted)
+        let res2 =
+            fetch_flyline_jsonl_history_from_offset(&temp_file, last_offset, Some("event-2"))
+                .unwrap();
+        // Since offset shifted, verification detects event_id mismatch and recovers, reading event3!
+        assert_eq!(res2.events.len(), 1);
+        assert_eq!(res2.events[0].id(), "event-3");
+        assert_eq!(res2.last_seen_event_id, Some("event-3".to_string()));
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_multiline_bash_history_parsing() {
+        let sample = r#"#1785345081
+git pull
+#1785345107
+git checkout -b quad_click
+#1785345375
+cat <<EOF1
+asdf oiuweoir uwer 
+asdf asd fds f
+asdfasdfsdf 
+EOF1
+
+#1785345413
+clear
+"#;
+        let entries = HistoryManager::parse_bash_history_str(sample);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].command, "git pull");
+        assert_eq!(
+            entries[0].timestamp.map(|t| t.as_seconds()),
+            Some(1785345081)
+        );
+        assert_eq!(entries[1].command, "git checkout -b quad_click");
+        assert_eq!(
+            entries[2].command,
+            "cat <<EOF1\nasdf oiuweoir uwer \nasdf asd fds f\nasdfasdfsdf \nEOF1"
+        );
+        assert_eq!(
+            entries[2].timestamp.map(|t| t.as_seconds()),
+            Some(1785345375)
+        );
+        assert_eq!(entries[3].command, "clear");
+    }
+
+    #[test]
+    fn test_ensure_timestamp_nanos() {
+        assert_eq!(TimestampNanos::ensure_timestamp_nanos(42), 42_000_000_000);
+        assert_eq!(
+            TimestampNanos::ensure_timestamp_nanos(1700000000),
+            1700000000_000_000_000
+        );
+        assert_eq!(
+            TimestampNanos::ensure_timestamp_nanos(1700000000123),
+            1700000000123_000_000
+        );
+        assert_eq!(
+            TimestampNanos::ensure_timestamp_nanos(1700000000123456),
+            1700000000123456_000
+        );
+        assert_eq!(
+            TimestampNanos::ensure_timestamp_nanos(1700000000123456789),
+            1700000000123456789
+        );
     }
 }

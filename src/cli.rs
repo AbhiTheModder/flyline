@@ -555,6 +555,26 @@ enum Commands {
         #[arg(long = "select-with-mouse", default_missing_value = "true", num_args = 0..=1)]
         select_with_mouse: Option<bool>,
     },
+    /// Configure history backend and behavior.
+    ///
+    /// Examples:
+    ///   flyline history import /path/to/history_file
+    ///   flyline history --backend flyline
+    ///   flyline history --backend bash
+    #[command(name = "history", verbatim_doc_comment)]
+    History {
+        /// Subcommand for history operations (e.g. import).
+        #[command(subcommand)]
+        subcommand: Option<HistorySubcommands>,
+
+        /// Select the history storage backend (flyline or bash).
+        #[arg(long = "backend", value_enum)]
+        backend: Option<crate::settings::HistoryBackend>,
+
+        /// Specify a custom path for Flyline's JSONL history file (defaults to ~/.local/share/flyline/history.jsonl)
+        #[arg(long = "jsonl-path", value_name = "PATH")]
+        jsonl_path: Option<String>,
+    },
     /// Configure suggestion behavior.
     ///
     /// Examples:
@@ -637,6 +657,16 @@ enum SuggestionsSubcommands {
     /// Configure flycomp settings.
     #[command(name = "flycomp", verbatim_doc_comment)]
     Flycomp(flycomp::FlycompSettings),
+}
+
+#[derive(Subcommand, Debug)]
+enum HistorySubcommands {
+    /// Import bash/zsh history file or Atuin SQLite database into Flyline JSONL history.
+    #[command(name = "import")]
+    Import {
+        /// Path to the bash/zsh history file or Atuin SQLite DB to import. If omitted, imports from default Atuin SQLite database.
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1414,6 +1444,58 @@ impl Flyline {
                         if let Some(enabled) = select_with_mouse {
                             log::info!("Select with mouse set to {}", enabled);
                             self.settings.select_with_mouse = enabled;
+                        }
+                    }
+                    Some(Commands::History {
+                        subcommand,
+                        backend,
+                        jsonl_path,
+                    }) => {
+                        if let Some(path) = jsonl_path {
+                            let expanded =
+                                std::path::PathBuf::from(bash_funcs::expand_filename(&path));
+                            self.settings
+                                .history_manager
+                                .set_jsonl_history_path(expanded);
+                        }
+                        if let Some(sub) = subcommand {
+                            match sub {
+                                HistorySubcommands::Import { path } => {
+                                    let target_jsonl_path =
+                                        self.settings.history_manager.jsonl_path();
+                                    let result = if let Some(ref p) = path {
+                                        let expanded_p = std::path::PathBuf::from(
+                                            bash_funcs::expand_filename(&p.to_string_lossy()),
+                                        );
+                                        crate::history::import_history_file(
+                                            &expanded_p,
+                                            &target_jsonl_path,
+                                        )
+                                        .map(|count| (count, expanded_p.display().to_string()))
+                                    } else {
+                                        crate::history::import_atuin_history(&target_jsonl_path)
+                                            .map(|count| (count, "Atuin".to_string()))
+                                    };
+
+                                    match result {
+                                        Ok((count, src)) => {
+                                            println!(
+                                                "Successfully imported {} history entries from {} into {}",
+                                                count,
+                                                src,
+                                                target_jsonl_path.display()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to import history: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(b) = backend {
+                            log::info!("History backend set to {:?}", b);
+                            self.settings.history_backend = b;
                         }
                     }
                     Some(Commands::Suggestions {

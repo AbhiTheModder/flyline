@@ -1,8 +1,6 @@
 use super::*;
 use crate::content_builder::Coord;
-use crate::content_utils::{
-    gaussian_wave_animated, split_line_to_terminal_rows, ts_to_timeago_string_5chars,
-};
+use crate::content_utils::{gaussian_wave_animated, split_line_to_terminal_rows};
 use crate::tutorial;
 use ratatui::prelude::*;
 
@@ -132,7 +130,7 @@ impl<'a> App<'a> {
         let entry = &entries[formatted_entry.entry_index];
         let timeago_str = entry
             .timestamp
-            .map(ts_to_timeago_string_5chars)
+            .map(|ts| ts.format_timeago_5chars())
             .unwrap_or_else(|| "     ".to_string());
 
         let indicator_span = || {
@@ -806,7 +804,7 @@ impl<'a> App<'a> {
                     if is_last {
                         let mut extra_info_text = format!(" #idx={}", sug.index);
                         if let Some(ts) = sug.timestamp {
-                            let time_ago_str = ts_to_timeago_string_5chars(ts);
+                            let time_ago_str = ts.format_timeago_5chars();
                             extra_info_text.push_str(&format!(" {}", time_ago_str.trim_start()));
                         }
 
@@ -1170,7 +1168,7 @@ impl<'a> App<'a> {
                 };
                 let (entries, fuzzy_results, fuzzy_search_index, num_results, num_searched) =
                     match source {
-                        FuzzyHistorySource::PastCommands => &mut self.history_manager,
+                        FuzzyHistorySource::PastCommands => &mut self.settings.history_manager,
                         FuzzyHistorySource::CancelledCommands => {
                             &mut self.settings.cancelled_command_history_manager
                         }
@@ -1205,8 +1203,10 @@ impl<'a> App<'a> {
                 'outer: for formatted_entry in fuzzy_results.iter() {
                     let entry_idx = formatted_entry.idx_in_cache.unwrap_or(0);
                     let is_selected = fuzzy_search_index == Some(entry_idx);
+                    let entry_row = content.cursor_position().row;
+
                     if is_selected {
-                        content.set_focus_row(content.cursor_position().row + 1);
+                        content.set_focus_row(entry_row + 1);
                     }
 
                     Self::render_history_entry(
@@ -1438,7 +1438,9 @@ impl<'a> App<'a> {
                 match target {
                     RightClickCopyTarget::Selection(_) => "⎘ Copy (selection)".to_string(),
                     RightClickCopyTarget::Buffer(_) => "⎘ Copy (buffer)".to_string(),
-                    RightClickCopyTarget::HistoryEntry(_) => "⎘ Copy (history entry)".to_string(),
+                    RightClickCopyTarget::HistoryEntry(_, _) => {
+                        "⎘ Copy (history entry)".to_string()
+                    }
                     RightClickCopyTarget::Cwd(_) => "⎘ Copy (cwd)".to_string(),
                     RightClickCopyTarget::Suggestion(_) => "⎘ Copy (suggestion)".to_string(),
                     RightClickCopyTarget::AiResult(_) => "⎘ Copy (AI result)".to_string(),
@@ -1461,19 +1463,45 @@ impl<'a> App<'a> {
                 ("↶ Undo", Tag::RightClickUndo),
                 ("↷ Redo", Tag::RightClickRedo),
             ];
-            let extra_entries = [("Run Tutorial", Tag::RightClickRunTutorial)];
             let selected_tag = mouse_state(|m| m.last_mouse_over_cell_semantic);
             let style = self.settings.colour_palette.right_click_menu();
             let selected_style = Palette::convert_to_highlighted(style);
-            let info_lines = ["Toggle mouse capture", "with Escape."];
+
+            let showing_history_details = matches!(
+                self.right_click_copy_target,
+                Some(RightClickCopyTarget::HistoryEntry(_, Some(_)))
+            );
+
+            let extra_entries: &[(&str, Tag)] = if showing_history_details {
+                &[]
+            } else {
+                &[("Run Tutorial", Tag::RightClickRunTutorial)]
+            };
+
+            let mut info_lines_vec = Vec::new();
+            if let Some(RightClickCopyTarget::HistoryEntry(_, Some(ref entry))) =
+                self.right_click_copy_target
+            {
+                let extra_info = crate::content_utils::format_history_entry_extra_info(entry);
+                for line in extra_info.lines() {
+                    if !line.trim().is_empty() {
+                        info_lines_vec.push(line.to_string());
+                    }
+                }
+            } else {
+                info_lines_vec.push("Toggle mouse capture".to_string());
+                info_lines_vec.push("with Escape.".to_string());
+            }
+            let info_lines_refs: Vec<&str> = info_lines_vec.iter().map(|s| s.as_str()).collect();
+
             let secondary_style = style.fg(ratatui::style::Color::DarkGray);
             let is_left_button_down = mouse_state(|m| m.is_left_button_down());
 
-            let has_separator = !extra_entries.is_empty() || !info_lines.is_empty();
+            let has_separator = !extra_entries.is_empty() || !info_lines_refs.is_empty();
             let popup_height = (entries.len()
                 + extra_entries.len()
                 + if has_separator { 1 } else { 0 }
-                + info_lines.len()) as u16;
+                + info_lines_refs.len()) as u16;
 
             let y_start =
                 if (viewport_top as u32) + (popup_pos.row as u32) + 1 + (popup_height as u32)
@@ -1495,7 +1523,7 @@ impl<'a> App<'a> {
                 terminal_height,
                 style,
                 selected_style,
-                &info_lines,
+                &info_lines_refs,
                 secondary_style,
             );
         }
