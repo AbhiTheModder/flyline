@@ -6,7 +6,7 @@
 To install `flyline` for the first time, run the following command in your terminal:
 
 ```bash
-curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh | sh
+source <(curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh)
 ```
 
 ### Arch Linux
@@ -24,7 +24,7 @@ paru -S flyline
 4. **Symlink Management**: Creates a versioned file (e.g., `libflyline.so.1.2.1`) and updates the `libflyline.so` symlink to point to it.
 5. **Shell Configuration**: Appends or updates the dynamic builtin load command in your `~/.bashrc`:
    ```bash
-   enable -f ~/.local/lib/libflyline.so flyline
+   enable flyline 2>/dev/null || enable -f ~/.local/lib/libflyline.so flyline
    ```
    *(Note: If `flyline` is already loaded in the shell, detected via the `FLYLINE_VERSION` environment variable, the installer automatically **skips** modifying your `~/.bashrc`, assuming your existing setup is already configured).*
 
@@ -34,7 +34,7 @@ paru -S flyline
 Upgrading `flyline` to the latest version uses the exact same script. You simply re-run the `curl` command:
 
 ```bash
-curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh | sh
+source <(curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh)
 ```
 
 ### Upgrade Notification
@@ -80,5 +80,5 @@ To install version `v1.2.0` in a custom directory (`~/apps/lib`):
 ```bash
 export FLYLINE_INSTALL_DIR="~/apps/lib"
 export FLYLINE_INSTALL_VERSION="v1.2.0"
-curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh | sh
+source <(curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh)
 ```
