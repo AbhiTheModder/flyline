@@ -1,15 +1,17 @@
+use crate::palette::{ButtonState, Palette};
 use crate::stateful_sliding_window::StatefulSlidingWindow;
+use crate::unicode_helpers::{Directions, PipeStyle, pipe};
 use rand::prelude::*;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, StyledGrapheme};
+use ratatui::widgets::Widget;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use tui_scrollbar::{ScrollBar, ScrollBarArrows, ScrollLengths};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-
-use crate::palette::{ButtonState, Palette};
-use crate::unicode_helpers::{Directions, PipeStyle, pipe};
 
 /// Describes how [`Tag`]s are applied to the graphemes of a [`TaggedSpan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1186,38 +1188,45 @@ impl Contents {
         visible: usize,
         start: usize,
         thumb_style: ratatui::style::Style,
-        gutter_style: ratatui::style::Style,
     ) {
         if length == 0 || total == 0 || visible >= total {
             return;
         }
 
-        let l = length as f64;
-        let t = total as f64;
-        let v = visible as f64;
-        let s = start as f64;
-
-        // Size of the thumb (at least 1 cell)
-        let thumb_size = ((v / t) * l).round().max(1.0) as usize;
-        // Position of the thumb
-        let max_start = t - v;
-        let thumb_pos = if max_start > 0.0 {
-            ((s / max_start) * (l - thumb_size as f64)).round() as usize
-        } else {
-            0
+        let lengths = ScrollLengths {
+            content_len: total,
+            viewport_len: visible,
         };
+
+        use ratatui::style::{Color, Style};
+
+        let thumb_bg = thumb_style.bg.unwrap_or(Color::Reset);
+        let thumb_fg = thumb_style.fg.unwrap_or(Color::Reset);
+
+        let track_style = if thumb_style.has_modifier(Modifier::REVERSED) {
+            Style::default().fg(thumb_fg).bg(thumb_fg)
+        } else {
+            Style::default().fg(thumb_bg).bg(thumb_bg)
+        };
+
+        let scrollbar = ScrollBar::vertical(lengths)
+            .offset(start)
+            .arrows(ScrollBarArrows::None)
+            .thumb_style(thumb_style)
+            .track_style(track_style);
+
+        let area = Rect::new(0, 0, 1, length);
+        let mut tmp_buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(&scrollbar, area, &mut tmp_buf);
 
         for i in 0..length as usize {
             let row_y = y_start + i as u16;
-            let is_thumb = i >= thumb_pos && i < thumb_pos + thumb_size;
-            let symbol = if is_thumb { "█" } else { "░" };
-            let cell_style = if is_thumb { thumb_style } else { gutter_style };
 
-            if let Some(row) = self.buf.get_mut(row_y as usize)
+            if let Some(rendered_cell) = tmp_buf.cell((0, i as u16))
+                && let Some(row) = self.buf.get_mut(row_y as usize)
                 && let Some(tagged_cell) = row.get_mut(x as usize)
             {
-                tagged_cell.cell.reset();
-                tagged_cell.cell.set_symbol(symbol).set_style(cell_style);
+                tagged_cell.cell = rendered_cell.clone();
                 tagged_cell.tag = Tag::TabCompletionScrollBar {
                     cell_height: i,
                     max_cell_height: length.saturating_sub(1) as usize,
