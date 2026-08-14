@@ -6,8 +6,10 @@ use std::vec;
 use crate::content_utils::apply_match_indices_to_lines;
 use crate::palette::Palette;
 
+#[cfg(not(test))]
+use crate::bash_symbols;
+use crate::content_utils;
 use crate::stateful_sliding_window::StatefulSlidingWindow;
-use crate::{bash_symbols, content_utils};
 use flash::lexer::TokenKind;
 use itertools::Itertools;
 use ratatui::text::{Line, Span};
@@ -435,8 +437,6 @@ impl HistoryManager {
         all.extend(bash_entries);
         Self::normalize_entries(all)
     }
-
-
 
     #[cfg(test)]
     pub fn parse_bash_history_from_memory() -> Vec<HistoryEntry> {

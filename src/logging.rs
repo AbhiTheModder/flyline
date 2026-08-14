@@ -4,9 +4,10 @@ use log::{LevelFilter, Log, Metadata, Record};
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::unix::io::RawFd;
 #[cfg(test)]
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_LOGS: usize = 10_000;
@@ -76,6 +77,7 @@ impl Log for MemoryLogger {
             record.args()
         );
         self.write_stream_entry(&entry);
+        write_subshell_ipc_log(&entry);
         self.push(entry);
     }
 
@@ -84,6 +86,7 @@ impl Log for MemoryLogger {
 
 static LOGGER: OnceLock<MemoryLogger> = OnceLock::new();
 static TERMINAL_STREAMING: AtomicBool = AtomicBool::new(false);
+static SUBSHELL_IPC_FD: AtomicI32 = AtomicI32::new(-1);
 #[cfg(test)]
 static TEST_LOG_INIT: Once = Once::new();
 
@@ -133,30 +136,18 @@ pub fn last_n_logs(n: usize) -> Vec<String> {
     }
 }
 
-/// Clear all in-memory logs.
-pub fn clear_logs() {
-    if let Some(logger) = LOGGER.get() {
-        let mut entries = logger.entries.lock().unwrap();
-        entries.clear();
-    }
+/// Set the file descriptor for streaming log entries to the parent process across an IPC pipe.
+pub fn set_subshell_ipc_fd(fd: Option<RawFd>) {
+    SUBSHELL_IPC_FD.store(fd.unwrap_or(-1), Ordering::SeqCst);
 }
 
-/// Disable direct file/terminal log streaming (used in child processes to prevent double-logging).
-pub fn disable_streaming() {
-    if let Some(logger) = LOGGER.get() {
-        let mut stream_writer = logger.stream_writer.lock().unwrap();
-        *stream_writer = None;
-    }
-    TERMINAL_STREAMING.store(false, Ordering::Relaxed);
-}
-
-/// Retrieve all in-memory log entries and clear the buffer.
-pub fn take_logs() -> Vec<String> {
-    if let Some(logger) = LOGGER.get() {
-        let mut entries = logger.entries.lock().unwrap();
-        std::mem::take(&mut *entries).into()
-    } else {
-        vec![]
+fn write_subshell_ipc_log(entry: &str) {
+    let fd = SUBSHELL_IPC_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let bytes = entry.as_bytes();
+        let len = bytes.len() as u64;
+        let _ = crate::subshell_ipc::write_all_fd(fd, &len.to_ne_bytes())
+            .and_then(|_| crate::subshell_ipc::write_all_fd(fd, bytes));
     }
 }
 

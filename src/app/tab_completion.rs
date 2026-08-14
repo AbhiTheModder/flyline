@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::os::unix::io::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::vec;
 
@@ -7,11 +6,12 @@ use crate::active_suggestions::{
     ActiveSuggestions, ActiveSuggestionsBuilder, ProcessedSuggestion, SuggestionDescription,
     UnprocessedSuggestion,
 };
-use crate::app::{App, ContentMode, FlycompPromptSelection, TabCompletionHandle};
+use crate::app::{App, ContentMode, FlycompPromptSelection};
 use crate::bash_funcs::{self, QuoteType};
 use crate::content_utils::{self, ansi_string_to_spans};
 use crate::globbing::PathPatternExpansion;
 use crate::iter_first_last::FirstLast;
+use crate::subshell_ipc;
 use crate::tab_completion_context::CompType;
 use crate::text_buffer::SubString;
 use crate::users;
@@ -1213,9 +1213,6 @@ impl App<'_> {
 
         let wuc_substring = completion_context.word_under_cursor.clone();
 
-        let (tx, rx) =
-            std::sync::mpsc::channel::<Option<(ActiveSuggestionsBuilder, std::time::Duration)>>();
-
         let completion_context_owned = completion_context.into_owned();
 
         let command_word = completion_context_owned
@@ -1232,175 +1229,44 @@ impl App<'_> {
 
         let start_time = std::time::Instant::now();
 
-        let (read_fd, write_fd) = unsafe {
-            let mut fds: [libc::c_int; 2] = [0; 2];
-            if libc::pipe(fds.as_mut_ptr()) != 0 {
-                log::error!("Failed to create pipe for tab completion");
-                return;
-            }
-            (fds[0], fds[1])
-        };
-
-        // Ensure the background warming thread has finished before we fork,
-        // to prevent fork-deadlocks on inherited locked mutexes in the child process.
-        crate::threads::join_bash_func_threads();
-
-        let pid = unsafe { libc::fork() };
-
-        if pid == 0 {
-            // Child process
-            crate::logging::disable_streaming();
-            crate::logging::clear_logs();
-            unsafe {
-                libc::setsid();
-                // Reset common signals to default so the child process terminates cleanly and instantly on signals.
-                for sig in &[
-                    libc::SIGINT,
-                    libc::SIGTERM,
-                    libc::SIGHUP,
-                    libc::SIGQUIT,
-                    libc::SIGTSTP,
-                    libc::SIGTTIN,
-                    libc::SIGTTOU,
-                ] {
-                    libc::signal(*sig, libc::SIG_DFL);
-                }
-                libc::close(read_fd);
-                let dev_null =
-                    libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
-                if dev_null >= 0 {
-                    // Close these incase the tab completion generation tries to use them
-                    libc::dup2(dev_null, libc::STDIN_FILENO);
-                    libc::dup2(dev_null, libc::STDOUT_FILENO);
-                    libc::dup2(dev_null, libc::STDERR_FILENO);
-                    libc::close(dev_null);
-                }
-            }
+        if let Some(handle) = subshell_ipc::spawn_subshell(move || {
             let thread_start = std::time::Instant::now();
-            let result = gen_completions_internal(
-                &completion_context_owned,
-                auto_started,
-                will_run_flycomp_if_prog_comp_is_useless,
-            );
+            log::info!("TabCompletion child subshell started completion generation...");
+
+            let completion_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                gen_completions_internal(
+                    &completion_context_owned,
+                    auto_started,
+                    will_run_flycomp_if_prog_comp_is_useless,
+                )
+            }));
+
             let elapsed = thread_start.elapsed();
-
-            log::info!("Child process completed");
-            let child_logs = crate::logging::take_logs();
-
-            let data = (result.map(|r| (r, elapsed)), child_logs);
-            if let Ok(serialized) = serde_json::to_vec(&data) {
-                let mut file = unsafe { std::fs::File::from_raw_fd(write_fd) };
-                use std::io::Write;
-                let len = serialized.len() as u64;
-                if file.write_all(&len.to_ne_bytes()).is_ok() {
-                    let _ = file.write_all(&serialized);
+            let result = match completion_res {
+                Ok(res) => {
+                    log::info!("TabCompletion child subshell completed in {:?}", elapsed);
+                    res
                 }
-                drop(file);
-            } else {
-                unsafe {
-                    libc::close(write_fd);
+                Err(panic_err) => {
+                    log::error!("TabCompletion child subshell panicked: {:?}", panic_err);
+                    None
                 }
-            }
-
-            // Use _exit to avoid running atexit handlers in the child process.
-            unsafe {
-                libc::_exit(0);
-            }
-        } else if pid > 0 {
-            // Parent process
-            unsafe {
-                libc::close(write_fd);
-            }
-
-            // Using a thread here makes it easier to handle polling here and in the main app loop.
-            let _ =
-                crate::threads::spawn_thread(crate::threads::ThreadTag::TabCompletion, move || {
-                    let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-                    let mut len_buf = [0u8; 8];
-                    let payload: Option<(
-                        Option<(ActiveSuggestionsBuilder, std::time::Duration)>,
-                        Vec<String>,
-                    )> = if std::io::Read::read_exact(&mut file, &mut len_buf).is_err() {
-                        None
-                    } else {
-                        let len = u64::from_ne_bytes(len_buf);
-                        let mut data_buf = vec![0u8; len as usize];
-                        if std::io::Read::read_exact(&mut file, &mut data_buf).is_ok() {
-                            serde_json::from_slice(&data_buf).ok()
-                        } else {
-                            None
-                        }
-                    };
-
-                    let (completion_res, child_logs) = if let Some((res, logs)) = payload {
-                        (res, logs)
-                    } else {
-                        (None, vec![])
-                    };
-
-                    // Replay child logs inside the parent process
-                    for log_line in child_logs {
-                        crate::logging::log_raw_entry(log_line);
-                    }
-
-                    let _ = tx.send(completion_res);
-
-                    // Reap the child process to prevent zombie processes
-                    unsafe {
-                        let mut status = 0;
-                        libc::waitpid(pid, &mut status, 0);
-                        log::info!(
-                            "Tab completion process (pid {}) reaped in reader thread",
-                            pid
-                        );
-                    }
-                });
-
-            // Block for some time waiting for the process to finish.
-            // Block for at most 10ms (or 1ms for auto-started completion) to avoid blocking the main thread.
-            let timeout = if auto_started {
-                std::time::Duration::from_millis(1)
-            } else {
-                std::time::Duration::from_millis(10)
             };
 
-            match rx.recv_timeout(timeout) {
-                Ok(Some((builder, elapsed))) => {
-                    self.finish_tab_complete(builder, wuc_substring, elapsed, auto_started);
-                }
-                Ok(None) => {
-                    // No suggestions generated or process failed.
-                    self.finish_tab_complete(
-                        ActiveSuggestionsBuilder::new(),
-                        wuc_substring,
-                        start_time.elapsed(),
-                        auto_started,
-                    );
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Process hasn't finished yet; enter waiting mode.
-                    self.content_mode = ContentMode::TabCompletionWaiting {
-                        handle: TabCompletionHandle {
-                            receiver: rx,
-                            pid: Some(pid),
-                        },
-                        wuc_substring,
-                        start_time,
-                        auto_started,
-                        last_active_suggestions,
-                    };
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    log::warn!("Tab completion process disconnected unexpectedly");
-                }
-            }
+            Some(result.map(|r| (r, elapsed)))
+        }) {
+            self.content_mode = ContentMode::TabCompletionWaiting {
+                handle,
+                wuc_substring,
+                start_time,
+                auto_started,
+                last_active_suggestions,
+            };
+
+            let timeout_ms = if auto_started { 1 } else { 10 };
+            self.poll_tab_completion(timeout_ms);
         } else {
-            // Fork failed
-            log::error!("Failed to fork for tab completion");
-            unsafe {
-                libc::close(read_fd);
-                libc::close(write_fd);
-            }
+            log::error!("Failed to spawn subshell for tab completion");
         }
     }
 }

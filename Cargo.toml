@@ -20,7 +20,7 @@ chrono = { version = "0.4" }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 parking_lot = "0.12"
-ansi-to-tui = { git = "https://github.com/HalFrgrd/ansi-to-tui.git", rev = "9c6412009e661b4255dc7ba3a0aa58c47055d3cd" }
+ansi-to-tui = { git = "https://github.com/HalFrgrd/ansi-to-tui.git", rev = "9191cc682bc7042f6a0bdfbc762d94f99a42fc30" }
 libc = "0.2.186"
 anyhow = "1.0.102"
 unicode-width = { version = "0.2.0", default-features = false }
@@ -42,6 +42,8 @@ ctor = "1.0.7"
 flycomp = { git = "https://github.com/HalFrgrd/flycomp.git", rev = "754be16d7a2130ad12b6d038d42a8933c92c103f" }
 uuid = { version = "1.10", features = ["v7"] }
 dirs = "6.0"
+nix = { version = "0.29", features = ["process", "signal", "user", "fs", "poll"] }
+rmp-serde = "1.3"
 
 [features]
 pre_bash_4_4 = []

@@ -2,27 +2,20 @@
 use crate::bash_symbols;
 #[cfg(not(test))]
 use crate::bash_symbols::ShellVar;
-
 use anyhow::Result;
 
 #[cfg(not(test))]
 use libc::c_char;
 use libc::c_int;
 use lscolors::LsColors;
-use std::collections::HashMap;
-#[cfg(not(test))]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::io::Read;
-#[cfg(not(test))]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(not(test))]
 use std::os::unix::io::FromRawFd;
-use std::path::Path;
-#[cfg(not(test))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-#[cfg(not(test))]
 use std::time::SystemTime;
 
 #[cfg(not(test))]
@@ -68,7 +61,7 @@ where
     (result, output.to_string())
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CommandWordInfo {
     Unknown {
         command: String,
@@ -1845,10 +1838,10 @@ fn get_cached_builtins() -> Vec<CommandWordInfo> {
 
 /// Per-directory executable cache entry: the directory's last-modified time and
 /// the list of executable filenames found in that directory.
-#[cfg(not(test))]
-struct DirExecutables {
-    mtime: Option<SystemTime>,
-    names: Vec<String>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DirExecutables {
+    pub mtime: Option<SystemTime>,
+    pub names: Vec<String>,
 }
 
 /// Global cache that maps each directory on `PATH` to its executable names and
@@ -1859,12 +1852,10 @@ struct DirExecutables {
 /// 2. Newly-added directories are scanned and inserted.
 /// 3. For each remaining directory the last-modified time is compared to the
 ///    cached value; if it has changed the directory is re-scanned.
-#[cfg(not(test))]
-struct ExecutablesOnPath {
+pub struct ExecutablesOnPath {
     cache: HashMap<PathBuf, DirExecutables>,
 }
 
-#[cfg(not(test))]
 impl ExecutablesOnPath {
     fn new() -> Self {
         Self {
@@ -1872,58 +1863,66 @@ impl ExecutablesOnPath {
         }
     }
 
-    /// Update the cache in-place: evict removed PATH dirs, add new ones, and
-    /// re-scan any directory whose mtime has changed.
-    ///
-    /// This is pure file system stuff and should never require BASH_LOCK.
-    fn update_cache(path_env: Option<String>) {
-        let _timer = crate::perf::PerfTimer::start_and_log_on_drop("update_path_cache");
+    /// Compute changes to PATH directories in a background subshell.
+    /// Returns a payload with updated directory scans and current PATH set.
+    pub fn scan_path_updates(path_env: Option<String>) -> PathScanPayload {
         let current_dirs: Vec<PathBuf> = path_env
             .map(|p| p.split(':').map(PathBuf::from).collect())
             .unwrap_or_default();
 
-        let current_dir_set: HashSet<&PathBuf> = current_dirs.iter().collect();
+        let current_dir_set: HashSet<PathBuf> = current_dirs.iter().cloned().collect();
 
-        // Evict directories that are no longer on PATH.
-        EXECUTABLES_ON_PATH
+        let guard = EXECUTABLES_ON_PATH
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .cache
-            .retain(|dir, _| current_dir_set.contains(dir));
+            .unwrap_or_else(|e| e.into_inner());
 
-        // Refresh (or populate) each directory that is currently on PATH.
-        for dir in current_dirs {
+        let mut updated = HashMap::new();
+        for dir in &current_dirs {
             let current_mtime = dir.metadata().ok().and_then(|m| m.modified().ok());
 
-            let needs_update = {
-                let guard = EXECUTABLES_ON_PATH
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                match guard.cache.get(&dir) {
-                    Some(entry) if entry.mtime == current_mtime => false,
-                    _ => true,
-                }
+            let needs_update = match guard.cache.get(dir) {
+                Some(entry) if entry.mtime == current_mtime => false,
+                _ => true,
             };
 
             if needs_update {
                 let names = if current_mtime.is_some() {
-                    Self::scan_dir(&dir)
+                    Self::scan_dir(dir)
                 } else {
                     Vec::new()
                 };
 
-                EXECUTABLES_ON_PATH
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .cache
-                    .insert(
-                        dir,
-                        DirExecutables {
-                            mtime: current_mtime,
-                            names,
-                        },
-                    );
+                updated.insert(
+                    dir.clone(),
+                    DirExecutables {
+                        mtime: current_mtime,
+                        names,
+                    },
+                );
             }
+        }
+
+        PathScanPayload {
+            updated,
+            current_dirs: current_dir_set,
+        }
+    }
+
+    /// Apply the subshell's scan results back to the global cache:
+    /// evict removed PATH dirs, and insert newly scanned/updated dirs.
+    pub fn apply_updates(payload: PathScanPayload) {
+        let mut guard = EXECUTABLES_ON_PATH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Evict directories that are no longer on PATH.
+        guard
+            .cache
+            .retain(|dir, _| payload.current_dirs.contains(dir));
+
+        // Update only the directories that were modified or newly added.
+        for (dir, entry) in payload.updated {
+            guard.cache.insert(dir, entry);
         }
     }
 
@@ -1961,7 +1960,6 @@ impl ExecutablesOnPath {
     }
 }
 
-#[cfg(not(test))]
 static EXECUTABLES_ON_PATH: LazyLock<Mutex<ExecutablesOnPath>> =
     LazyLock::new(|| Mutex::new(ExecutablesOnPath::new()));
 
@@ -2014,13 +2012,11 @@ pub fn warm_bash_caches() {
 #[cfg(test)]
 pub fn warm_bash_caches() {}
 
-#[cfg(not(test))]
-pub fn warm_path_cache(path_env: Option<String>) {
-    ExecutablesOnPath::update_cache(path_env);
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PathScanPayload {
+    pub updated: HashMap<std::path::PathBuf, DirExecutables>,
+    pub current_dirs: HashSet<std::path::PathBuf>,
 }
-
-#[cfg(test)]
-pub fn warm_path_cache(_path_env: Option<String>) {}
 
 #[cfg(not(test))]
 pub fn read_terminating_signal() -> c_int {

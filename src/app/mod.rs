@@ -3,6 +3,8 @@ pub(crate) mod auto_close;
 pub(crate) mod formatted_buffer;
 mod tab_completion;
 mod ui;
+use crate::subshell_ipc::{self, IpcStatus, SubshellHandle};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 pub(crate) use ui::DrawnContent;
 
 #[derive(Debug, Clone)]
@@ -240,28 +242,7 @@ impl FuzzyHistorySource {
 
 /// Guard that owns the tab-completion background process and the result channel.
 /// Killing the process (on drop) ensures it does not outlive the app.
-pub(crate) struct TabCompletionHandle {
-    receiver: std::sync::mpsc::Receiver<Option<(ActiveSuggestionsBuilder, std::time::Duration)>>,
-    pid: Option<libc::pid_t>,
-}
-
-impl std::fmt::Debug for TabCompletionHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TabCompletionHandle").finish()
-    }
-}
-
-impl Drop for TabCompletionHandle {
-    fn drop(&mut self) {
-        if let Some(pid) = self.pid.take() {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-                // We don't need to wait for the pid here.
-                // The tab completion thread will wait for it and we wait for the thread when we unload the app.
-            }
-        }
-    }
-}
+pub(crate) type TabCompletionPayload = Option<(ActiveSuggestionsBuilder, std::time::Duration)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum FlycompPromptSelection {
@@ -279,7 +260,7 @@ pub(crate) enum ContentMode {
     /// the result channel receiver and the thread join-handle so that cleanup
     /// happens automatically when the mode transitions.
     TabCompletionWaiting {
-        handle: TabCompletionHandle,
+        handle: SubshellHandle<TabCompletionPayload>,
         wuc_substring: SubString,
         start_time: std::time::Instant,
         auto_started: bool,
@@ -315,7 +296,7 @@ pub(crate) enum ContentMode {
         command_word: String,
         _word_under_cursor: String,
         start_time: std::time::Instant,
-        thread_handle: crate::threads::SharedJoinHandle<anyhow::Result<String>>,
+        handle: SubshellHandle<String>,
     },
     TabCompletionFlycompResult {
         command_word: String,
@@ -371,6 +352,7 @@ pub(crate) struct App<'a> {
     pub(super) has_requested_cpr: bool,
     pub(super) has_enabled_focus_tracking: bool,
     pub(super) last_resize_time: Option<std::time::Instant>,
+    pub(super) path_warming_subshell: Option<SubshellHandle<crate::bash_funcs::PathScanPayload>>,
 }
 
 impl<'a> App<'a> {
@@ -396,22 +378,13 @@ impl<'a> App<'a> {
 
         bash_funcs::reset_caches();
 
-        // Join any previous warming thread to prevent multiple active warming threads
-        crate::threads::join_bash_func_threads();
-
-        let path_env = bash_funcs::get_envvar_value("PATH");
-        let _ = crate::threads::spawn_thread(crate::threads::ThreadTag::Warming, || {
-            let _timer = crate::perf::PerfTimer::start("warming_thread_bash");
-            let start = std::time::Instant::now();
-            crate::bash_funcs::warm_bash_caches();
-            log::info!("Warming bash caches finished in {:?}", start.elapsed());
+        time_it!("startup: warm bash caches", {
+            bash_funcs::warm_bash_caches();
         });
 
-        let _ = crate::threads::spawn_thread(crate::threads::ThreadTag::PathWarming, move || {
-            let _timer = crate::perf::PerfTimer::start("warming_thread_path");
-            let start = std::time::Instant::now();
-            crate::bash_funcs::warm_path_cache(path_env);
-            log::info!("Warming path cache finished in {:?}", start.elapsed());
+        let path_env = bash_funcs::get_envvar_value("PATH");
+        let path_warming_subshell = subshell_ipc::spawn_subshell(move || {
+            Some(bash_funcs::ExecutablesOnPath::scan_path_updates(path_env))
         });
 
         let mut terminal = time_it!("startup: terminal setup", {
@@ -516,6 +489,7 @@ impl<'a> App<'a> {
             has_requested_cpr: false,
             has_enabled_focus_tracking: false,
             last_resize_time: None,
+            path_warming_subshell,
         };
 
         app.on_possible_buffer_change();
@@ -804,10 +778,13 @@ impl<'a> App<'a> {
             if self.poll_agent() {
                 redraw = true;
             }
-            if self.poll_tab_completion() {
+            if self.poll_tab_completion(0) {
                 redraw = true;
             }
             if self.poll_flycomp() {
+                redraw = true;
+            }
+            if self.poll_path_warming() {
                 redraw = true;
             }
 
@@ -1655,151 +1632,151 @@ impl<'a> App<'a> {
         false
     }
 
-    /// Poll the tab-completion background thread; returns `true` if a redraw is needed.
-    fn poll_tab_completion(&mut self) -> bool {
+    /// Poll the tab-completion subshell; returns `true` if a redraw is needed.
+    fn poll_tab_completion(&mut self, timeout_ms: u16) -> bool {
         if let ContentMode::TabCompletionWaiting {
             ref handle,
+            ref wuc_substring,
             auto_started,
             ..
         } = self.content_mode
         {
-            match handle.receiver.try_recv() {
-                Ok(Some((builder, elapsed))) => {
-                    // Take ownership of wuc_substring from the waiting state.
-                    let (wuc, mut handle) =
-                        match std::mem::replace(&mut self.content_mode, ContentMode::Normal) {
-                            ContentMode::TabCompletionWaiting {
-                                wuc_substring,
-                                handle,
-                                ..
-                            } => (wuc_substring, handle),
-                            _ => unreachable!(),
-                        };
-                    handle.pid = None; // defuse
-                    self.finish_tab_complete(builder, wuc, elapsed, auto_started);
-                    self.on_possible_buffer_change();
-                    return true;
-                }
-                Ok(None) => {
-                    // No suggestions generated.
-                    if let ContentMode::TabCompletionWaiting { mut handle, .. } =
-                        std::mem::replace(&mut self.content_mode, ContentMode::Normal)
-                    {
-                        handle.pid = None; // defuse
+            use subshell_ipc::IpcStatus;
+            match handle.receiver.poll_status_timeout(timeout_ms) {
+                IpcStatus::Ready(completion_res) => {
+                    log::info!(
+                        "Tab completion subshell PID {} delivered payload",
+                        handle.pid
+                    );
+                    let wuc = wuc_substring.clone();
+                    self.content_mode = ContentMode::Normal;
+
+                    if let Some((builder, elapsed)) = completion_res {
+                        self.finish_tab_complete(builder, wuc, elapsed, auto_started);
+                        self.on_possible_buffer_change();
                     }
+                    return true;
+                }
+                IpcStatus::Disconnected => {
+                    log::error!(
+                        "Tab completion subshell PID {} disconnected without sending valid payload; resetting to Normal mode",
+                        handle.pid
+                    );
                     self.content_mode = ContentMode::Normal;
                     return true;
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Still waiting; keep TabCompletionWaiting mode.
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    log::warn!("Tab completion thread disconnected unexpectedly");
-                    self.content_mode = ContentMode::Normal;
-                    return true;
-                }
+                IpcStatus::Empty => match waitpid(handle.pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::Exited(_, code)) => {
+                        log::error!(
+                            "Tab completion subshell PID {} exited with code {} before sending payload",
+                            handle.pid,
+                            code
+                        );
+                        self.content_mode = ContentMode::Normal;
+                        return true;
+                    }
+                    Ok(WaitStatus::Signaled(_, sig, _)) => {
+                        log::error!(
+                            "Tab completion subshell PID {} killed by signal {:?} before sending payload",
+                            handle.pid,
+                            sig
+                        );
+                        self.content_mode = ContentMode::Normal;
+                        return true;
+                    }
+                    _ => {}
+                },
             }
         }
         false
     }
 
     fn poll_flycomp(&mut self) -> bool {
-        let finished = if let ContentMode::TabCompletionRunningFlycomp {
-            ref thread_handle, ..
+        if let ContentMode::TabCompletionRunningFlycomp {
+            ref command_word,
+            ref handle,
+            ..
         } = self.content_mode
         {
-            thread_handle.is_finished()
-        } else {
-            false
-        };
-
-        if finished {
-            let mode = std::mem::replace(&mut self.content_mode, ContentMode::Normal);
-            if let ContentMode::TabCompletionRunningFlycomp {
-                command_word,
-                thread_handle,
-                ..
-            } = mode
-            {
-                let join_res = thread_handle.join_value();
-
-                if let Some(res) = join_res {
-                    match res {
-                        Ok(Ok(script)) => {
-                            log::info!("flycomp succeeded for command '{}'", command_word);
-                            let output_dir = self.settings.flycomp.output_dir();
-                            match crate::bash_funcs::resolve_and_write_completion_script(
-                                &command_word,
-                                &script,
-                                output_dir,
-                            ) {
-                                Ok(write_path) => {
-                                    log::info!(
-                                        "Wrote synthesized completion script to '{}'",
-                                        write_path.display()
-                                    );
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to write completion script: {}", e);
-                                }
-                            }
-
-                            match crate::bash_funcs::evaluate_shell_string(&script) {
-                                Ok(_) => {
-                                    log::info!(
-                                        "Successfully evaluated synthesized completion script for '{}'",
-                                        command_word
-                                    );
-                                    self.start_tab_complete(false, None);
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "Failed to evaluate synthesized completion script: {:?}",
-                                        e
-                                    );
-                                    let error_message = format!(
-                                        "Failed to load script:\n  - {}",
-                                        e.chain()
-                                            .map(|c| c.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join("\n  - ")
-                                    );
-                                    self.content_mode = ContentMode::TabCompletionFlycompResult {
-                                        command_word,
-                                        error_message,
-                                    };
-                                }
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            log::warn!("flycomp failed for command '{}': {:?}", command_word, e);
-                            let error_message = e
-                                .chain()
-                                .map(|c| c.to_string())
-                                .collect::<Vec<_>>()
-                                .join("\n  - ");
-                            self.content_mode = ContentMode::TabCompletionFlycompResult {
-                                command_word,
-                                error_message,
-                            };
-                        }
-                        Err(join_err) => {
-                            log::error!("flycomp thread panicked: {:?}", join_err);
-                            self.content_mode = ContentMode::TabCompletionFlycompResult {
-                                command_word,
-                                error_message: "Thread panicked".to_string(),
-                            };
-                        }
-                    }
+            match handle.receiver.poll_status() {
+                IpcStatus::Ready(script) => {
+                    let cmd_word = command_word.clone();
+                    log::info!("flycomp succeeded for command '{}'", cmd_word);
+                    let output_dir = self.settings.flycomp.output_dir();
+                    let _ = crate::bash_funcs::resolve_and_write_completion_script(
+                        &cmd_word, &script, output_dir,
+                    );
+                    let _ = crate::bash_funcs::evaluate_shell_string(&script);
+                    self.content_mode = ContentMode::Normal;
+                    self.start_tab_complete(false, None);
+                    return true;
                 }
-                return true;
+                IpcStatus::Disconnected => {
+                    log::error!(
+                        "flycomp subshell PID {} disconnected without sending script for command '{}'",
+                        handle.pid,
+                        command_word
+                    );
+                    self.content_mode = ContentMode::TabCompletionFlycompResult {
+                        command_word: command_word.clone(),
+                        error_message: "flycomp subshell exited without payload".to_string(),
+                    };
+                    return true;
+                }
+                IpcStatus::Empty => match waitpid(handle.pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::Exited(_, code)) if code != 0 => {
+                        log::error!(
+                            "flycomp subshell PID {} exited with non-zero code {}",
+                            handle.pid,
+                            code
+                        );
+                        self.content_mode = ContentMode::TabCompletionFlycompResult {
+                            command_word: command_word.clone(),
+                            error_message: format!("flycomp failed with exit code {}", code),
+                        };
+                        return true;
+                    }
+                    Ok(WaitStatus::Signaled(_, sig, _)) => {
+                        log::error!(
+                            "flycomp subshell PID {} killed by signal {:?}",
+                            handle.pid,
+                            sig
+                        );
+                        self.content_mode = ContentMode::TabCompletionFlycompResult {
+                            command_word: command_word.clone(),
+                            error_message: format!("flycomp killed by signal {:?}", sig),
+                        };
+                        return true;
+                    }
+                    _ => {}
+                },
+            }
+        }
+        false
+    }
+
+    fn poll_path_warming(&mut self) -> bool {
+        if let Some(ref handle) = self.path_warming_subshell {
+            match handle.receiver.poll_status() {
+                IpcStatus::Ready(infos) => {
+                    bash_funcs::ExecutablesOnPath::apply_updates(infos);
+                    log::debug!("Path warming subshell finished successfully");
+                    self.path_warming_subshell = None;
+                    return true;
+                }
+                IpcStatus::Disconnected => {
+                    log::warn!("Path warming subshell disconnected without payload");
+                    self.path_warming_subshell = None;
+                    return true;
+                }
+                IpcStatus::Empty => {}
             }
         }
         false
     }
 
     pub(crate) fn run_flycomp(&mut self, command_word: String, word_under_cursor: String) {
-        let poss_alias = crate::bash_funcs::find_alias(&command_word);
+        let poss_alias = bash_funcs::find_alias(&command_word);
         let alias_def = poss_alias
             .as_deref()
             .filter(|alias| !alias.is_empty())
@@ -1812,28 +1789,30 @@ impl<'a> App<'a> {
 
         let mut cmd_word = alias_expanded_command_word;
         if cmd_word.starts_with('~') || cmd_word.contains('/') {
-            let expanded = crate::bash_funcs::fully_expand_path(&cmd_word);
+            let expanded = bash_funcs::fully_expand_path(&cmd_word);
             if !expanded.is_empty() {
                 cmd_word = expanded;
             }
         }
         let start_time = std::time::Instant::now();
         let flycomp_settings = self.settings.flycomp.clone();
-        let shared_handle =
-            crate::threads::spawn_thread(crate::threads::ThreadTag::Flycomp, move || {
-                crate::reset_sigchld();
-                flycomp::generate_completion_output_with_settings(
-                    &cmd_word,
-                    flycomp::OutputFormat::Bash,
-                    &flycomp_settings,
-                )
-            });
-        self.content_mode = ContentMode::TabCompletionRunningFlycomp {
-            command_word,
-            _word_under_cursor: word_under_cursor,
-            start_time,
-            thread_handle: shared_handle,
-        };
+
+        if let Some(handle) = subshell_ipc::spawn_subshell(move || {
+            crate::reset_sigchld();
+            flycomp::generate_completion_output_with_settings(
+                &cmd_word,
+                flycomp::OutputFormat::Bash,
+                &flycomp_settings,
+            )
+            .ok()
+        }) {
+            self.content_mode = ContentMode::TabCompletionRunningFlycomp {
+                command_word,
+                _word_under_cursor: word_under_cursor,
+                start_time,
+                handle,
+            };
+        }
     }
 
     fn show_agent_mode_not_configured_error(&mut self) {
