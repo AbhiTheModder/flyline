@@ -29,6 +29,10 @@ pub(crate) type ContextValues = super::ContextValues<ContextVar>;
 pub enum KeyEventAction {
     #[strum(message = "Toggle Yes/No choice in the flycomp prompt")]
     FlycompAskToggleChoice,
+    #[strum(message = "Move to the next choice in the flycomp prompt")]
+    FlycompAskNextChoice,
+    #[strum(message = "Move to the previous choice in the flycomp prompt")]
+    FlycompAskPrevChoice,
     #[strum(message = "Accept the current Yes/No choice in the flycomp prompt")]
     FlycompAskAcceptChoice,
     #[strum(message = "Accept inline history suggestion")]
@@ -101,6 +105,8 @@ pub enum KeyEventAction {
     InsertNewline,
     #[strum(message = "Start tab completion")]
     RunTabCompletion,
+    #[strum(message = "Forcibly run flycomp completion synthesis for the current command")]
+    RunFlycomp,
     #[strum(message = "Toggle mouse state (Simple and Smart modes)")]
     ToggleMouse,
     #[strum(message = "Send EOF to Bash if ignoreeof is non-zero")]
@@ -317,7 +323,7 @@ impl KeyEventAction {
                     app.content_mode = ContentMode::Normal;
                 }
             }
-            KeyEventAction::FlycompAskToggleChoice => {
+            KeyEventAction::FlycompAskToggleChoice | KeyEventAction::FlycompAskNextChoice => {
                 if let ContentMode::TabCompletionAskForFlycomp {
                     ref mut selection, ..
                 } = app.content_mode
@@ -326,6 +332,18 @@ impl KeyEventAction {
                         FlycompPromptSelection::Yes => FlycompPromptSelection::No,
                         FlycompPromptSelection::No => FlycompPromptSelection::DontAsk,
                         FlycompPromptSelection::DontAsk => FlycompPromptSelection::Yes,
+                    };
+                }
+            }
+            KeyEventAction::FlycompAskPrevChoice => {
+                if let ContentMode::TabCompletionAskForFlycomp {
+                    ref mut selection, ..
+                } = app.content_mode
+                {
+                    *selection = match *selection {
+                        FlycompPromptSelection::Yes => FlycompPromptSelection::DontAsk,
+                        FlycompPromptSelection::No => FlycompPromptSelection::Yes,
+                        FlycompPromptSelection::DontAsk => FlycompPromptSelection::No,
                     };
                 }
             }
@@ -503,6 +521,7 @@ impl KeyEventAction {
                 app.buffer.insert_newline();
             }
             KeyEventAction::RunTabCompletion => app.start_tab_complete(false, None),
+            KeyEventAction::RunFlycomp => app.force_start_flycomp(),
             KeyEventAction::ToggleMouse => {
                 if matches!(
                     app.settings.mouse_mode,
@@ -2005,19 +2024,24 @@ pub static DEFAULT_BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
         ),
         // --- TabCompletionAskForFlycomp bindings ---
         Binding::new(
-            &expand_variations![
-                KC::Left.into(),
-                KC::Right.into(),
-                KC::Up.into(),
-                KC::Down.into()
-            ],
+            &expand_variations![KC::Left.into(), KC::Up.into()],
             ContextVar::TabCompletionAskForFlycomp.into(),
-            &[KeyEventAction::FlycompAskToggleChoice],
+            &[KeyEventAction::FlycompAskPrevChoice],
+        ),
+        Binding::new(
+            &expand_variations![KC::Right.into(), KC::Down.into()],
+            ContextVar::TabCompletionAskForFlycomp.into(),
+            &[KeyEventAction::FlycompAskNextChoice],
         ),
         Binding::new(
             &[KC::Tab.into()],
             ContextVar::TabCompletionAskForFlycomp.into(),
-            &[KeyEventAction::FlycompAskToggleChoice],
+            &[KeyEventAction::FlycompAskNextChoice],
+        ),
+        Binding::new(
+            &expand_variations![KC::BackTab.into()],
+            ContextVar::TabCompletionAskForFlycomp.into(),
+            &[KeyEventAction::FlycompAskPrevChoice],
         ),
         Binding::new(
             &[KC::Enter.into()],
@@ -2277,6 +2301,11 @@ pub static DEFAULT_BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             &[KC::Tab.into()],
             ContextVar::Always.into(),
             &[KeyEventAction::RunTabCompletion],
+        ),
+        Binding::new(
+            &expand_variations![KC::BackTab.into()],
+            ContextVar::Always.into(),
+            &[KeyEventAction::RunFlycomp],
         ),
         Binding::new(
             &[KC::Escape.into()],
@@ -3947,6 +3976,16 @@ mod tests {
                 == KeyEventAction::InlineSuggestionAccept
         );
         assert!(KeyEventAction::try_from("clearBuffer").unwrap() == KeyEventAction::ClearBuffer);
+        assert!(
+            KeyEventAction::try_from("flycompAskNextChoice").unwrap()
+                == KeyEventAction::FlycompAskNextChoice
+        );
+        assert!(
+            KeyEventAction::try_from("flycompAskPrevChoice").unwrap()
+                == KeyEventAction::FlycompAskPrevChoice
+        );
+        assert!(KeyEventAction::try_from("runFlycomp").unwrap() == KeyEventAction::RunFlycomp);
+        assert_eq!(KeyEventAction::RunFlycomp.as_str(), "runFlycomp");
     }
 
     #[test]

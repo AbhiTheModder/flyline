@@ -24,29 +24,17 @@ pub struct TimestampNanos(pub u64);
 impl TimestampNanos {
     pub const ZERO: TimestampNanos = TimestampNanos(0);
 
-    pub fn ensure_timestamp_nanos(ts: u64) -> u64 {
-        if ts >= 100_000_000_000_000_000 {
-            // Nanoseconds (19 digits)
-            ts
-        } else if ts >= 100_000_000_000_000 {
-            // Microseconds (16 digits)
-            ts.saturating_mul(1_000)
-        } else if ts >= 100_000_000_000 {
-            // Milliseconds (13 digits)
-            ts.saturating_mul(1_000_000)
-        } else {
-            // Seconds (10 digits or less)
-            ts.saturating_mul(1_000_000_000)
-        }
-    }
-
     pub fn new(raw: u64) -> Self {
-        TimestampNanos(Self::ensure_timestamp_nanos(raw))
+        TimestampNanos(raw)
     }
 
     #[allow(dead_code)]
     pub fn from_nanos(nanos: u64) -> Self {
         TimestampNanos(nanos)
+    }
+
+    pub fn from_seconds(secs: u64) -> Self {
+        TimestampNanos(secs.saturating_mul(1_000_000_000))
     }
 
     pub fn now() -> Self {
@@ -473,8 +461,8 @@ impl HistoryManager {
                         if let Ok(timestamp_str) = timestamp_cstr.to_str() {
                             // If there are no timestamps in the history file,
                             // Bash will use the current time for all entries, which can lead to many identical timestamps.
-                            let ts_str = timestamp_str.trim_start_matches('#').trim();
-                            ts_str.parse::<u64>().ok()
+                            HistoryManager::parse_timestamp(timestamp_str)
+                                .map(|s| TimestampNanos::from_seconds(s).raw_nanos())
                         } else {
                             None
                         }
@@ -617,7 +605,7 @@ impl HistoryManager {
                     }
                 }
 
-                let mut entry = HistoryEntry::new(Some(ts_raw), 0, command);
+                let mut entry = HistoryEntry::new(Some(timestamp.raw_nanos()), 0, command);
                 let meta = entry.metadata_mut();
                 meta.id = Some(id);
                 meta.cwd = cwd;
@@ -746,8 +734,14 @@ impl HistoryManager {
                 hostname: entry.hostname().map(String::from),
                 session: self.session_id.clone(),
             };
-            if let Err(e) = append_jsonl_history_event(&event, &path) {
-                log::warn!("Failed to write start event to JSONL history: {}", e);
+            match append_jsonl_history_event(&event, &path) {
+                Ok(start_offset) => {
+                    self.last_read_jsonl_byte_offset = start_offset;
+                    self.last_seen_event_id = Some(command_id.clone());
+                }
+                Err(e) => {
+                    log::warn!("Failed to write start event to JSONL history: {}", e);
+                }
             }
         }
 
@@ -759,13 +753,19 @@ impl HistoryManager {
             let path = self.ensure_jsonl_repopulated_if_needed();
             let end_ts = TimestampNanos::now();
             let event = HistoryJsonlEvent::End {
-                id: cmd_id,
+                id: cmd_id.clone(),
                 timestamp: end_ts,
                 exit_status: Some(exit_status),
                 pipestatus,
             };
-            if let Err(e) = append_jsonl_history_event(&event, &path) {
-                log::warn!("Failed to write end event to JSONL history: {}", e);
+            match append_jsonl_history_event(&event, &path) {
+                Ok(start_offset) => {
+                    self.last_read_jsonl_byte_offset = start_offset;
+                    self.last_seen_event_id = Some(cmd_id);
+                }
+                Err(e) => {
+                    log::warn!("Failed to write end event to JSONL history: {}", e);
+                }
             }
             self.merge_jsonl_event(event);
         }
@@ -801,11 +801,16 @@ impl HistoryManager {
     }
 
     fn parse_timestamp(line: &str) -> Option<u64> {
-        if let Some(stripped) = line.strip_prefix('#') {
-            stripped.trim().parse::<u64>().ok()
-        } else {
-            None
+        // Bash writes `#<timestamp>` directly (digits immediately after `#` with no whitespace).
+        let rest = line.strip_prefix('#')?;
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            let val = rest.parse::<u64>().ok()?;
+            // Minimum bound: 100_000_000 (year 1973) to filter out small numbers / issue numbers like #123
+            if (100_000_000..=10_000_000_000).contains(&val) {
+                return Some(val);
+            }
         }
+        None
     }
 
     pub fn parse_bash_history_str(s: &str) -> Vec<HistoryEntry> {
@@ -825,7 +830,7 @@ impl HistoryManager {
                     res.push(entry);
                 }
                 current_cmd_lines.clear();
-                current_ts = Some(ts);
+                current_ts = Some(TimestampNanos::from_seconds(ts).raw_nanos());
             } else if has_seen_timestamp && current_ts.is_some() {
                 if current_cmd_lines.len() >= 100 {
                     let cmd_str = current_cmd_lines.join("\n");
@@ -875,7 +880,8 @@ impl HistoryManager {
                         let timestamp = ts_dur
                             .split(':')
                             .next()
-                            .and_then(|ts| ts.parse::<u64>().ok());
+                            .and_then(|ts| ts.parse::<u64>().ok())
+                            .map(|s| TimestampNanos::from_seconds(s).raw_nanos());
                         (timestamp, cmd.to_string())
                     } else {
                         // Malformed extended format, treat as simple
@@ -1364,9 +1370,21 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp() {
-        assert_eq!(HistoryManager::parse_timestamp("#12345"), Some(12345));
-        assert_eq!(HistoryManager::parse_timestamp("12345"), None);
+        assert_eq!(
+            HistoryManager::parse_timestamp("#1625078400"),
+            Some(1625078400)
+        );
+        assert_eq!(
+            HistoryManager::parse_timestamp("#1785345081"),
+            Some(1785345081)
+        );
+        assert_eq!(HistoryManager::parse_timestamp("# 1625078400"), None);
+        assert_eq!(HistoryManager::parse_timestamp("  #1625078400"), None);
+        assert_eq!(HistoryManager::parse_timestamp("1625078400"), None);
+        assert_eq!(HistoryManager::parse_timestamp("#12345"), None);
+        assert_eq!(HistoryManager::parse_timestamp("#1"), None);
         assert_eq!(HistoryManager::parse_timestamp("#not_a_number"), None);
+        assert_eq!(HistoryManager::parse_timestamp("#cd /asdf/asdf"), None);
     }
 
     #[test]
@@ -1979,24 +1997,14 @@ clear
     }
 
     #[test]
-    fn test_ensure_timestamp_nanos() {
-        assert_eq!(TimestampNanos::ensure_timestamp_nanos(42), 42_000_000_000);
-        assert_eq!(
-            TimestampNanos::ensure_timestamp_nanos(1700000000),
-            1700000000_000_000_000
-        );
-        assert_eq!(
-            TimestampNanos::ensure_timestamp_nanos(1700000000123),
-            1700000000123_000_000
-        );
-        assert_eq!(
-            TimestampNanos::ensure_timestamp_nanos(1700000000123456),
-            1700000000123456_000
-        );
-        assert_eq!(
-            TimestampNanos::ensure_timestamp_nanos(1700000000123456789),
-            1700000000123456789
-        );
+    fn test_jsonl_timestamp_42_billion_not_overflowing_to_future() {
+        let json_line = r#"{"type":"start","id":"019ffc2c-74e4-75c0-b0ef-894f3cc3d411","ts":42000000000,"cmd":"oldcommandhere","host":"itx-desktop","sesh":"019ffc2c-74b4-7191-821d-23093c6c1020"}"#;
+        let event: HistoryJsonlEvent = serde_json::from_str(json_line).unwrap();
+        let entry = HistoryEntry::try_from(event).unwrap();
+        assert_eq!(entry.timestamp.unwrap().raw_nanos(), 42_000_000_000);
+        assert_eq!(entry.timestamp.unwrap().as_seconds(), 42);
+        let dt = entry.timestamp.unwrap().format_local_datetime().unwrap();
+        assert!(dt.starts_with("1970"));
     }
 
     #[test]

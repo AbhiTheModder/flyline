@@ -1084,7 +1084,7 @@ pub(crate) fn apply_tab_complete_to_buffer(
 }
 
 impl App<'_> {
-    pub(crate) fn completion_context(&self) -> tab_completion_context::CompletionContext<'_> {
+    pub(crate) fn get_completion_context(&self) -> tab_completion_context::CompletionContext<'_> {
         tab_completion_context::get_completion_context(
             self.buffer.buffer(),
             self.buffer.cursor_byte_pos(),
@@ -1116,7 +1116,7 @@ impl App<'_> {
         load_time: std::time::Duration,
         auto_started: bool,
     ) {
-        let completion_context = self.completion_context();
+        let completion_context = self.get_completion_context();
         let command_word = completion_context
             .context
             .as_ref()
@@ -1126,17 +1126,7 @@ impl App<'_> {
             .to_string();
 
         if builder.should_run_flycomp {
-            let output_dir = self.settings.flycomp.output_dir();
-            let dump_path =
-                crate::bash_funcs::resolve_completion_script_path(&command_word, output_dir)
-                    .to_string_lossy()
-                    .into_owned();
-            self.content_mode = ContentMode::TabCompletionAskForFlycomp {
-                command_word,
-                word_under_cursor: wuc_substring.s.clone(),
-                selection: FlycompPromptSelection::Yes,
-                dump_path,
-            };
+            self.start_flycomp_prompt(command_word, wuc_substring.s.clone(), false);
             return;
         }
 
@@ -1190,6 +1180,47 @@ impl App<'_> {
             }
         }
     }
+    pub(crate) fn start_flycomp_prompt(
+        &mut self,
+        command_word: String,
+        word_under_cursor: String,
+        forced: bool,
+    ) {
+        let output_dir = self.settings.flycomp.output_dir();
+        let dump_path =
+            crate::bash_funcs::resolve_completion_script_path(&command_word, output_dir)
+                .to_string_lossy()
+                .into_owned();
+        self.content_mode = ContentMode::TabCompletionAskForFlycomp {
+            command_word,
+            word_under_cursor,
+            selection: FlycompPromptSelection::Yes,
+            dump_path,
+            forced,
+        };
+    }
+
+    pub fn force_start_flycomp(&mut self) {
+        if let ContentMode::TabCompletionWaiting { handle, .. } =
+            std::mem::replace(&mut self.content_mode, ContentMode::Normal)
+        {
+            drop(handle);
+        }
+        let completion_context = self.get_completion_context();
+        let wuc_substring = completion_context.word_under_cursor.clone();
+        let completion_context_owned = completion_context.into_owned();
+        let command_word = completion_context_owned
+            .context
+            .as_ref()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !command_word.is_empty() {
+            self.start_flycomp_prompt(command_word, wuc_substring.s, true);
+        }
+    }
+
     pub fn start_tab_complete(
         &mut self,
         auto_started: bool,
@@ -1209,7 +1240,7 @@ impl App<'_> {
         // We store word_under_cursor as an owned SubString so we can use it
         // after the immutable-borrow block ends.
 
-        let completion_context = self.completion_context();
+        let completion_context = self.get_completion_context();
 
         let wuc_substring = completion_context.word_under_cursor.clone();
 
@@ -1231,7 +1262,7 @@ impl App<'_> {
 
         if let Some(handle) = subshell_ipc::spawn_subshell(move || {
             let thread_start = std::time::Instant::now();
-            log::info!("TabCompletion child subshell started completion generation...");
+            log::trace!("TabCompletion child subshell started completion generation...");
 
             let completion_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 gen_completions_internal(
@@ -1244,7 +1275,7 @@ impl App<'_> {
             let elapsed = thread_start.elapsed();
             let result = match completion_res {
                 Ok(res) => {
-                    log::info!("TabCompletion child subshell completed in {:?}", elapsed);
+                    log::trace!("TabCompletion child subshell completed in {:?}", elapsed);
                     res
                 }
                 Err(panic_err) => {

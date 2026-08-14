@@ -291,6 +291,7 @@ pub(crate) enum ContentMode {
         word_under_cursor: String,
         selection: FlycompPromptSelection,
         dump_path: String,
+        forced: bool,
     },
     TabCompletionRunningFlycomp {
         command_word: String,
@@ -1644,7 +1645,7 @@ impl<'a> App<'a> {
             use subshell_ipc::IpcStatus;
             match handle.receiver.poll_status_timeout(timeout_ms) {
                 IpcStatus::Ready(completion_res) => {
-                    log::info!(
+                    log::trace!(
                         "Tab completion subshell PID {} delivered payload",
                         handle.pid
                     );
@@ -2210,7 +2211,7 @@ impl<'a> App<'a> {
                     })
             };
 
-            let new_wuc = self.completion_context().word_under_cursor;
+            let new_wuc = self.get_completion_context().word_under_cursor;
             let action = get_action(self, &new_wuc).unwrap_or(CompletionAction::Keep);
 
             match action {
