@@ -89,6 +89,7 @@ rusty-fork = "0.3.1"
 panic = "unwind"
 overflow-checks = true
 lto = true
+codegen-units = 1
 
 [build-dependencies]
 chrono = { version = "0.4" }
