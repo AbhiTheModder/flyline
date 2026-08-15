@@ -1,4 +1,5 @@
-use crate::bash_funcs::{self, QuoteType};
+use crate::grammar::{QuoteType, dequoting_function_rust, quoting_function_rust};
+use crate::shell;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct GlobPatternSplit<'a> {
@@ -145,9 +146,9 @@ impl PathPatternExpansion {
         let split = split_glob_pattern(pattern);
         let raw_prefix = split.raw_prefix.to_string();
         let rhs_pattern = split.rhs_pattern.to_string();
-        let expanded_prefix = bash_funcs::fully_expand_path(&raw_prefix);
+        let expanded_prefix = shell::backend().expand_path(&raw_prefix);
 
-        let rhs_pattern = bash_funcs::dequoting_function_rust(&rhs_pattern);
+        let rhs_pattern = dequoting_function_rust(&rhs_pattern);
 
         PathPatternExpansion {
             raw_prefix,
@@ -183,12 +184,8 @@ impl PathPatternExpansion {
         };
 
         if let Some(rhs) = expanded_match.strip_prefix(&expected_prefix) {
-            let quoted_rhs = bash_funcs::quoting_function_rust(
-                rhs,
-                quote_type.unwrap_or_default(),
-                false,
-                false,
-            );
+            let quoted_rhs =
+                quoting_function_rust(rhs, quote_type.unwrap_or_default(), false, false);
             let combined = join_path_parts(&self.raw_prefix, &quoted_rhs);
             (combined.clone(), quoted_rhs)
         } else {

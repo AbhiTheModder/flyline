@@ -1,22 +1,24 @@
 #[cfg(not(test))]
-use crate::bash_symbols;
-#[cfg(not(test))]
-use crate::bash_symbols::ShellVar;
+use super::symbols as bash_symbols;
+use super::symbols::ShellVar;
+pub use crate::completions::{CompspecOption, ProgrammableCompleteReturn};
+pub use crate::grammar::{
+    QuoteType, dequoting_function_rust, find_quote_type, quoting_function_rust,
+};
+pub use crate::path::EXECUTABLES_ON_PATH;
+pub use crate::shell::CommandWordInfo;
 use anyhow::Result;
 
 #[cfg(not(test))]
 use libc::c_char;
 use libc::c_int;
-use lscolors::LsColors;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(test))]
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 #[cfg(not(test))]
 use std::os::unix::io::FromRawFd;
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
-use std::time::SystemTime;
+use std::path::Path;
+use std::sync::Mutex;
 
 #[cfg(not(test))]
 fn with_redirected_stdout<F, R>(func: F) -> (R, String)
@@ -61,85 +63,9 @@ where
     (result, output.to_string())
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, serde::Serialize, serde::Deserialize)]
-pub enum CommandWordInfo {
-    Unknown {
-        command: String,
-    },
-    Alias {
-        command: String,
-        expansion: String,
-    },
-    Keyword {
-        command: String,
-        usage: Option<String>,
-    },
-    Function {
-        command: String,
-        source_file: Option<String>,
-        line: Option<i32>,
-    },
-    Builtin {
-        command: String,
-        usage: Option<String>,
-    },
-    File {
-        command: String,
-        path: String,
-    },
-}
-
-impl CommandWordInfo {
-    pub fn is_known(&self) -> bool {
-        !matches!(self, CommandWordInfo::Unknown { .. })
-    }
-
-    pub fn command(&self) -> &str {
-        match self {
-            CommandWordInfo::Unknown { command } => command,
-            CommandWordInfo::Alias { command, .. } => command,
-            CommandWordInfo::Keyword { command, .. } => command,
-            CommandWordInfo::Function { command, .. } => command,
-            CommandWordInfo::Builtin { command, .. } => command,
-            CommandWordInfo::File { command, .. } => command,
-        }
-    }
-
-    pub fn to_description(&self) -> String {
-        match self {
-            CommandWordInfo::Unknown { .. } => "unknown".to_string(),
-            CommandWordInfo::Alias { expansion, .. } => format!("alias: {}", expansion),
-            CommandWordInfo::Keyword { command, usage } => {
-                if let Some(u) = usage {
-                    format!("keyword: {}", u)
-                } else {
-                    format!("keyword: {}", command)
-                }
-            }
-            CommandWordInfo::Builtin { command, usage } => {
-                if let Some(u) = usage {
-                    format!("builtin: {}", u)
-                } else {
-                    format!("builtin: {}", command)
-                }
-            }
-            // Most of them are files so this cleans things up
-            CommandWordInfo::File { path, .. } => path.clone(),
-            CommandWordInfo::Function {
-                source_file, line, ..
-            } => match (source_file, line) {
-                (Some(file), Some(l)) => format!("function {}:{}", file, l),
-                (Some(file), None) => format!("function {}", file),
-                (None, Some(l)) => format!("function :{}", l),
-                (None, None) => "function".to_string(),
-            },
-        }
-    }
-}
-
 #[cfg(not(test))]
 pub fn find_alias(cmd: &str) -> Option<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let alias_ptr =
             bash_symbols::get_alias_value(std::ffi::CString::new(cmd).unwrap().as_ptr());
@@ -164,7 +90,7 @@ pub fn find_alias(cmd: &str) -> Option<String> {
 
 #[cfg(not(test))]
 fn get_command_info_uncached(cmd: &str) -> CommandWordInfo {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     // If the command word looks like a filename (contains '/' or starts with
     // '~'), expand it first so that tilde and variable expansion are resolved
     // before the lookup.
@@ -340,7 +266,7 @@ pub fn get_command_info(cmd: &str) -> CommandWordInfo {
 
 #[cfg(not(test))]
 pub fn format_shell_var_uncached(name: &str) -> String {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     get_shell_var(name)
         .and_then(|mut var| {
             let (res, output) = with_redirected_stdout(|| unsafe {
@@ -398,7 +324,7 @@ pub fn reset_caches() {
 
 #[cfg(not(test))]
 pub fn get_all_aliases() -> Vec<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     // TODO can we extract more info here?
     let mut aliases = Vec::new();
 
@@ -451,7 +377,7 @@ pub fn get_all_reserved_words() -> Vec<String> {
 
 #[cfg(not(test))]
 pub fn get_all_variables_with_prefix(prefix: &str) -> Vec<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     let mut variables = Vec::new();
     let prefix_c_str = std::ffi::CString::new(prefix.strip_prefix('$').unwrap_or(prefix)).unwrap();
 
@@ -501,7 +427,7 @@ pub fn get_all_variables_with_prefix(prefix: &str) -> Vec<String> {
 
 #[cfg(not(test))]
 pub fn get_all_shell_functions() -> Vec<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     let mut functions = Vec::new();
 
     unsafe {
@@ -539,7 +465,7 @@ pub fn get_all_shell_functions() -> Vec<String> {
 
 #[cfg(not(test))]
 pub fn get_all_shell_builtins() -> Vec<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     let mut builtins = Vec::new();
 
     unsafe {
@@ -567,270 +493,10 @@ pub fn get_all_shell_builtins() -> Vec<String> {
 /* Values for COMPSPEC options field. */
 // In bash >= 4.4, COPT_NOQUOTE was inserted at (1<<4), shifting later values.
 // In bash < 4.4: NOSPACE=(1<<4), BASHDEFAULT=(1<<5), PLUSDIRS=(1<<6)
-// In bash >= 4.4: NOQUOTE=(1<<4), NOSPACE=(1<<5), BASHDEFAULT=(1<<6), PLUSDIRS=(1<<7), NOSORT=(1<<8), FULLQUOTE=(1<<9)
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum CompspecOption {
-    Reserved = 1 << 0,
-    Default = 1 << 1,
-    Filenames = 1 << 2,
-    Dirnames = 1 << 3,
-    #[cfg(not(feature = "pre_bash_4_4"))]
-    NoQuote = 1 << 4,
-    #[cfg(not(feature = "pre_bash_4_4"))]
-    NoSpace = 1 << 5,
-    #[cfg(not(feature = "pre_bash_4_4"))]
-    BashDefault = 1 << 6,
-    #[cfg(not(feature = "pre_bash_4_4"))]
-    PlusDirs = 1 << 7,
-    #[cfg(not(feature = "pre_bash_4_4"))]
-    NoSort = 1 << 8,
-    #[cfg(not(feature = "pre_bash_4_4"))]
-    FullQuote = 1 << 9,
-    #[cfg(feature = "pre_bash_4_4")]
-    NoSpace = 1 << 4,
-    #[cfg(feature = "pre_bash_4_4")]
-    BashDefault = 1 << 5,
-    #[cfg(feature = "pre_bash_4_4")]
-    PlusDirs = 1 << 6,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CompletionFlags {
-    pub quote_type: Option<QuoteType>,
-
-    pub readline_default_fallback_desired: bool,
-    // pub dirnames_desired: bool, // Bash handles this already during call to programmable_completions
-    // pub plus_dirs: bool, // Likewise
-    pub filename_quoting_desired: bool,
-    pub filename_completion_desired: bool,
-    pub no_suffix_desired: bool,
-    pub suffix_character: char,
-    pub bash_default_fallback_desired: bool,
-    pub nosort_desired: bool,
-    // pub full_quote: bool,
-    pub some_dont_end_in_equal_sign: bool,
-}
-
-impl CompletionFlags {
-    pub fn from(
-        quote_type: Option<QuoteType>,
-        foundcs: c_int,
-        append_char: i32,
-        some_dont_end_in_equal_sign: bool,
-    ) -> Self {
-        Self {
-            quote_type,
-            readline_default_fallback_desired: foundcs & (CompspecOption::Default as c_int) != 0,
-            #[cfg(not(feature = "pre_bash_4_4"))]
-            filename_quoting_desired: foundcs & (CompspecOption::NoQuote as c_int) == 0,
-            #[cfg(feature = "pre_bash_4_4")]
-            filename_quoting_desired: true,
-            filename_completion_desired: foundcs & (CompspecOption::Filenames as c_int) != 0,
-            no_suffix_desired: foundcs & (CompspecOption::NoSpace as c_int) != 0,
-            suffix_character: char::from_u32(append_char as u32).unwrap_or(' '),
-            bash_default_fallback_desired: foundcs & (CompspecOption::BashDefault as c_int) != 0,
-            #[cfg(not(feature = "pre_bash_4_4"))]
-            nosort_desired: foundcs & (CompspecOption::NoSort as c_int) != 0,
-            #[cfg(feature = "pre_bash_4_4")]
-            nosort_desired: false,
-            some_dont_end_in_equal_sign,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn from_alt(word_under_cursor: &str, completions: &[String]) -> Self {
-        let mut flags = Self::default();
-        flags.quote_type = find_quote_type(word_under_cursor);
-        flags.some_dont_end_in_equal_sign = completions.iter().any(|s| !s.ends_with('='));
-        flags
-    }
-}
-
-impl Default for CompletionFlags {
-    fn default() -> Self {
-        Self {
-            quote_type: None,
-            readline_default_fallback_desired: true,
-            filename_quoting_desired: true,
-            filename_completion_desired: false,
-            no_suffix_desired: false,
-            suffix_character: ' ',
-            bash_default_fallback_desired: false,
-            nosort_desired: false,
-            some_dont_end_in_equal_sign: false,
-        }
-    }
-}
-
-pub struct ProgrammableCompleteReturn {
-    pub completions: Vec<String>,
-    pub flags: CompletionFlags,
-    pub compspec_was_useful: bool,
-}
-
-impl std::fmt::Debug for ProgrammableCompleteReturn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const MAX_DISPLAY: usize = 50;
-        let mut s = f.debug_struct("ProgrammableCompleteReturn");
-        if self.completions.len() <= MAX_DISPLAY {
-            s.field("completions", &self.completions);
-        } else {
-            s.field(
-                "completions",
-                &format_args!(
-                    "({} total, showing first {}) {:?}",
-                    self.completions.len(),
-                    MAX_DISPLAY,
-                    &self.completions[..MAX_DISPLAY]
-                ),
-            );
-        }
-        s.field("flags", &self.flags)
-            .field("compspec_was_useful", &self.compspec_was_useful)
-            .finish()
-    }
-}
-
-fn is_strict_completion_value(val: &str) -> bool {
-    if val.is_empty() {
-        return false;
-    }
-    let first = val.chars().next().unwrap();
-    if !first.is_ascii_alphanumeric() && first != '-' {
-        return false;
-    }
-    val.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || c == '-'
-            || c == '_'
-            || c == ':'
-            || c == '.'
-            || c == '/'
-            || c == '@'
-    })
-}
-
-fn analyze_candidate(s: &str) -> Option<(&str, &str, usize)> {
-    if s.contains('\t') {
-        return None;
-    }
-    if let Some(pos) = s.find("  ") {
-        let value = &s[..pos];
-        let rest = &s[pos..];
-        let description = rest.trim_start();
-        let desc_start_index = s.len() - rest.len() + (rest.len() - description.len());
-
-        if is_strict_completion_value(value) && !description.is_empty() {
-            return Some((value, description, desc_start_index));
-        }
-    }
-    None
-}
-
-fn should_infer_filename_completion(completions: &[String], flags: &CompletionFlags) -> bool {
-    if flags.filename_completion_desired
-        || completions.is_empty()
-        || completions.len() >= crate::FILENAME_INFERENCE_LIMIT
-    {
-        return false;
-    }
-
-    completions.iter().all(|completion| {
-        !completion.contains('\t') && Path::new(&fully_expand_path(completion)).exists()
-    })
-}
-
-/// Some completion scripts like gh or docker put descriptions inline with
-/// the suggestion when there are multiple suggestions.
-/// So here I convert those to the format "suggestion<TAB>description" so that
-/// flyline can show the description in a separate column.
-fn detect_and_convert_inline_descriptions(completions: &mut Vec<String>, flags: &CompletionFlags) {
-    if flags.filename_completion_desired || completions.iter().any(|s| s.contains('\t')) {
-        return;
-    }
-
-    let mut detected = false;
-
-    if completions.len() == 1 {
-        if let Some((value, description, _)) = analyze_candidate(&completions[0]) {
-            if description.contains(' ') || value.starts_with('-') {
-                detected = true;
-            }
-        }
-    } else if completions.len() > 1 {
-        let mut desc_columns = std::collections::HashMap::new();
-
-        for s in completions.iter() {
-            if let Some((_, _, col)) = analyze_candidate(s) {
-                *desc_columns.entry(col).or_insert(0) += 1;
-            }
-        }
-
-        let has_aligned = desc_columns.values().any(|&count| count >= 2);
-
-        if has_aligned {
-            detected = true;
-        }
-    }
-
-    if detected {
-        for s in completions.iter_mut() {
-            if let Some((value, description, _)) = analyze_candidate(s) {
-                let description = if let Some(stripped) = description
-                    .strip_prefix('(')
-                    .and_then(|s| s.strip_suffix(')'))
-                {
-                    stripped
-                } else {
-                    description
-                };
-                *s = format!("{}\t{}", value, description);
-            }
-        }
-    }
-}
-
-impl ProgrammableCompleteReturn {
-    pub fn new(
-        mut completions: Vec<String>,
-        mut flags: CompletionFlags,
-        compspec_was_useful: bool,
-    ) -> Self {
-        if should_infer_filename_completion(&completions, &flags) {
-            flags.filename_completion_desired = true;
-        }
-        detect_and_convert_inline_descriptions(&mut completions, &flags);
-        Self {
-            completions,
-            flags,
-            compspec_was_useful,
-        }
-    }
-
-    pub fn from(
-        completions: Vec<String>,
-        quote_type: Option<QuoteType>,
-        foundcs: c_int,
-        append_char: i32,
-        compspec_was_useful: bool,
-    ) -> Self {
-        let some_dont_end_in_equal_sign = completions.iter().any(|s| !s.ends_with('='));
-        Self::new(
-            completions,
-            CompletionFlags::from(
-                quote_type,
-                foundcs,
-                append_char,
-                some_dont_end_in_equal_sign,
-            ),
-            compspec_was_useful,
-        )
-    }
-}
 
 #[cfg(not(test))]
 fn vec_of_strings_from_char_char_ptr(ptr: *mut *mut c_char) -> Vec<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     let mut strings = Vec::new();
     let mut seen = HashSet::new();
     unsafe {
@@ -868,7 +534,7 @@ fn vec_of_strings_from_char_char_ptr(ptr: *mut *mut c_char) -> Vec<String> {
 
 #[cfg(not(test))]
 pub fn useful_compspec_ran(command_word: &str) -> bool {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let command_word_cstr = match std::ffi::CString::new(command_word) {
             Ok(cstr) => cstr,
@@ -935,7 +601,7 @@ pub fn useful_compspec_ran(_command_word: &str) -> bool {
 
 #[cfg(not(test))]
 pub fn evaluate_shell_string(script: &str) -> Result<()> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let script_cstr = std::ffi::CString::new(script)?;
         let allocated_ptr = bash_symbols::locked_xmalloc_cstr(&script_cstr);
@@ -971,6 +637,34 @@ pub fn evaluate_shell_string(_script: &str) -> Result<()> {
 }
 
 #[cfg(not(test))]
+extern "C" fn quoting_function_c(
+    s: *const c_char,
+    _rtype: c_int,
+    quote_char: *const c_char,
+) -> *mut c_char {
+    let _guard = super::symbols::BASH_LOCK.lock();
+    let s_str = unsafe { std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned() };
+    let quote_char_str = unsafe { std::ffi::CStr::from_ptr(quote_char).to_string_lossy() };
+    let quote_type = quote_char_str
+        .chars()
+        .next()
+        .and_then(QuoteType::from_char)
+        .unwrap_or_default();
+    let quoted = quoting_function_rust(&s_str, quote_type, true, true);
+    let quoted_cstr = std::ffi::CString::new(quoted).unwrap();
+    unsafe { bash_symbols::locked_xmalloc_cstr(&quoted_cstr) }
+}
+
+#[cfg(not(test))]
+extern "C" fn dequoting_function_c(s: *const c_char, _quote_char: c_int) -> *mut c_char {
+    let _guard = super::symbols::BASH_LOCK.lock();
+    let s_str = unsafe { std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned() };
+    let dequoted = dequoting_function_rust(&s_str);
+    let dequoted_cstr = std::ffi::CString::new(dequoted).unwrap();
+    unsafe { bash_symbols::locked_xmalloc_cstr(&dequoted_cstr) }
+}
+
+#[cfg(not(test))]
 pub fn run_programmable_completions(
     full_command: &str,                // "git commi asdf" with cursor just after com
     command_word: &str,                // "git"
@@ -978,7 +672,7 @@ pub fn run_programmable_completions(
     cursor_byte_pos: usize,            // 7 since cursor is after "com" in "git com|mi asdf"
     word_under_cursor_byte_end: usize, // 9 since we want the end of "commi"
 ) -> Result<ProgrammableCompleteReturn> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     log::debug!(
         "run_programmable_completions called with\nfull_command='{}'\ncommand_word='{}'\nword_under_cursor='{}'\ncursor_byte_pos={}\nword_under_cursor_byte_end={}",
         full_command,
@@ -1251,7 +945,7 @@ pub fn print_copt_flags(flag: c_int) {
 
 #[cfg(not(test))]
 pub fn get_shell_var(var_name: &str) -> Option<ShellVar> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let var_cstr = std::ffi::CString::new(var_name).unwrap();
         let value_ptr = bash_symbols::find_variable(var_cstr.as_ptr());
@@ -1264,7 +958,7 @@ pub fn get_shell_var(var_name: &str) -> Option<ShellVar> {
 
 #[cfg(not(test))]
 pub fn get_envvar_value(var_name: &str) -> Option<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     get_shell_var(var_name).and_then(|var| var.get_value())
 }
 
@@ -1277,7 +971,7 @@ pub fn get_envvar_value(var_name: &str) -> Option<String> {
 
 #[cfg(not(test))]
 pub fn get_last_command_exit_value() -> i32 {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe { bash_symbols::last_command_exit_value as i32 }
 }
 
@@ -1288,10 +982,10 @@ pub fn get_last_command_exit_value() -> i32 {
 
 #[cfg(not(test))]
 pub fn get_pipestatus() -> Option<String> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         if let Ok(var_name_cstr) = std::ffi::CString::new("PIPESTATUS") {
-            let var_ptr = crate::bash_symbols::find_variable(var_name_cstr.as_ptr());
+            let var_ptr = super::symbols::find_variable(var_name_cstr.as_ptr());
             if !var_ptr.is_null() {
                 let var = &*var_ptr;
                 if var.is_array() {
@@ -1306,7 +1000,7 @@ pub fn get_pipestatus() -> Option<String> {
                 }
             }
         }
-        let last_exit = crate::bash_symbols::last_command_exit_value;
+        let last_exit = super::symbols::last_command_exit_value;
         Some(last_exit.to_string())
     }
 }
@@ -1318,10 +1012,10 @@ pub fn get_pipestatus() -> Option<String> {
 
 #[cfg(not(test))]
 pub fn check_add_history(cmd: &str) -> bool {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     if let Ok(c_cmd) = std::ffi::CString::new(cmd) {
         unsafe {
-            return crate::bash_symbols::check_add_history(c_cmd.as_ptr(), 0) != 0;
+            return super::symbols::check_add_history(c_cmd.as_ptr(), 0) != 0;
         }
     }
     true
@@ -1334,7 +1028,7 @@ pub fn check_add_history(_cmd: &str) -> bool {
 
 #[cfg(not(test))]
 pub fn get_hostname() -> String {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let ptr = bash_symbols::current_host_name;
         if ptr.is_null() {
@@ -1352,7 +1046,7 @@ pub fn get_hostname() -> String {
 
 #[cfg(not(test))]
 pub fn get_cwd() -> String {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         // get_working_directory returns a newly allocated string via savestring (using xmalloc)
         // (see mirror-bash/builtins/common.c:618). We must free it with locked_xfree.
@@ -1376,7 +1070,7 @@ pub fn get_cwd() -> String {
 
 #[cfg(not(test))]
 pub fn expand_filename(filename: &str) -> String {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         // expand_string_to_string returns an allocated string via string_list (using xmalloc)
         // (see mirror-bash/subst.c:3859 / 3869). We must free it with locked_xfree.
@@ -1528,210 +1222,6 @@ pub fn resolve_and_write_completion_script(
     Ok(write_path)
 }
 
-// QuoteType can be  in the middle  of a word (i.e.  backslash)
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
-pub enum QuoteType {
-    SingleQuote,
-    DoubleQuote,
-    #[default]
-    Backslash,
-}
-
-impl QuoteType {
-    pub fn from_char(c: char) -> Option<QuoteType> {
-        match c {
-            '\'' => Some(QuoteType::SingleQuote),
-            '"' => Some(QuoteType::DoubleQuote),
-            '\\' => Some(QuoteType::Backslash),
-            _ => None,
-        }
-    }
-
-    pub fn into_byte(self) -> u8 {
-        match self {
-            QuoteType::SingleQuote => b'\'',
-            QuoteType::DoubleQuote => b'"',
-            QuoteType::Backslash => b'\\',
-        }
-    }
-}
-
-/* Quote a filename using double quotes, single quotes, or backslashes
-depending on the value of completion_quoting_style.  If we're
-completing using backslashes, we need to quote some additional
-characters (those that readline treats as word breaks), so we call
-quote_word_break_chars on the result.  This returns newly-allocated
-memory. */
-// static char * bash_quote_filename (char *s, int rtype, char *qcp)
-// TODO: handle edge cases that bash_quote_filename handles
-#[cfg(not(test))]
-extern "C" fn quoting_function_c(
-    s: *const c_char,
-    _rtype: c_int,
-    quote_char: *const c_char,
-) -> *mut c_char {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
-    let s_str = unsafe { std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned() };
-    let quote_char_str = unsafe { std::ffi::CStr::from_ptr(quote_char).to_string_lossy() };
-    let quote_type = quote_char_str
-        .chars()
-        .next()
-        .and_then(QuoteType::from_char)
-        .unwrap_or_default();
-    let quoted = quoting_function_rust(&s_str, quote_type, true, true);
-    let quoted_cstr = std::ffi::CString::new(quoted).unwrap();
-    unsafe { bash_symbols::locked_xmalloc_cstr(&quoted_cstr) }
-}
-
-pub fn quoting_function_rust(
-    s: &str,
-    quote_type: QuoteType,
-    opening_quote: bool,
-    closing_quote: bool,
-) -> String {
-    match quote_type {
-        QuoteType::SingleQuote => {
-            let mut quoted = s.replace('\'', "'\\''");
-            if opening_quote {
-                quoted = format!("'{}", quoted);
-            }
-            if closing_quote {
-                quoted.push('\'');
-            }
-            quoted
-        }
-        QuoteType::DoubleQuote => {
-            let escaped: String = s
-                .chars()
-                .map(|c| {
-                    if DOUBLE_QUOTE_SPECIAL_CHARS.contains(&c) {
-                        format!("\\{}", c)
-                    } else {
-                        c.to_string()
-                    }
-                })
-                .collect();
-
-            let mut quoted = if opening_quote {
-                format!("\"{}", escaped)
-            } else {
-                escaped
-            };
-            if closing_quote {
-                quoted.push('"');
-            }
-            quoted
-        }
-        QuoteType::Backslash => s
-            .chars()
-            .map(|c| {
-                if c.is_whitespace() || BACKSLASH_SPECIAL_CHARS.contains(&c) {
-                    format!("\\{}", c)
-                } else {
-                    c.to_string()
-                }
-            })
-            .collect(),
-    }
-}
-
-const DOUBLE_QUOTE_SPECIAL_CHARS: &[char] = &['$', '`', '"', '\\', '!', '\n'];
-const BACKSLASH_SPECIAL_CHARS: &[char] = &[
-    ' ', '\t', '\n', '\\', '"', '\'', '!', '$', '&', '(', ')', '*', ';', '<', '>', '?', '[', ']',
-    '^', '`', '{', '|', '}',
-];
-
-/* Filename quoting for completion. */
-/* A function to strip unquoted quote characters (single quotes, double
-quotes, and backslashes).  It allows single quotes to appear
-within double quotes, and vice versa.  It should be smarter. */
-// static char *bash_dequote_filename (char *text, int quote_char)
-#[cfg(not(test))]
-extern "C" fn dequoting_function_c(s: *const c_char, _quote_char: c_int) -> *mut c_char {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
-    let s_str = unsafe { std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned() };
-    let dequoted = dequoting_function_rust(&s_str);
-    let dequoted_cstr = std::ffi::CString::new(dequoted).unwrap();
-    unsafe { bash_symbols::locked_xmalloc_cstr(&dequoted_cstr) }
-}
-
-pub fn dequoting_function_rust(s: &str) -> String {
-    let mut res = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                if let Some(next_char) = chars.next() {
-                    res.push(next_char);
-                }
-            }
-            '\'' => {
-                for next_char in chars.by_ref() {
-                    if next_char == '\'' {
-                        break;
-                    }
-                    res.push(next_char);
-                }
-            }
-            '"' => {
-                while let Some(next_char) = chars.next() {
-                    if next_char == '"' {
-                        break;
-                    }
-                    if next_char == '\\' {
-                        if let Some(escaped_char) = chars.next() {
-                            res.push(escaped_char);
-                        }
-                    } else {
-                        res.push(next_char);
-                    }
-                }
-            }
-            _ => res.push(c),
-        }
-    }
-    res
-}
-
-// This function
-//    returns the opening quote character if we found an unclosed quoted
-//    substring, '\0' otherwise.  FP, if non-null, is set to a value saying
-//    which (shell-like) quote characters we found (single quote, double
-//    quote, or backslash) anywhere in the string.  DP, if non-null, is set to
-//    the value of the delimiter character that caused a word break. */
-// It sets fp to  a bitfield  but no one ever reads that bitfield so we can ignore it for now
-// char _rl_find_completion_word (int *fp, int *dp)
-
-pub fn find_quote_type(s: &str) -> Option<QuoteType> {
-    if s.starts_with("\"") {
-        return Some(QuoteType::DoubleQuote);
-    } else if s.starts_with('\'') {
-        return Some(QuoteType::SingleQuote);
-    } else {
-        // Check for odd number of consecutive backslashes
-        let mut backslash_count = 0;
-        let mut max_consecutive_backslashes = 0;
-
-        for c in s.chars() {
-            if c == '\\' {
-                backslash_count += 1;
-            } else if backslash_count > 0 {
-                max_consecutive_backslashes = max_consecutive_backslashes.max(backslash_count);
-                backslash_count = 0;
-            }
-        }
-        // Handle case where string ends with backslashes
-        if backslash_count > 0 {
-            max_consecutive_backslashes = max_consecutive_backslashes.max(backslash_count);
-        }
-
-        if max_consecutive_backslashes > 0 && max_consecutive_backslashes % 2 == 1 {
-            return Some(QuoteType::Backslash);
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // Cached environment lookups
 // ---------------------------------------------------------------------------
@@ -1778,7 +1268,7 @@ fn get_cached_reserved_words() -> Vec<CommandWordInfo> {
 
 #[cfg(not(test))]
 fn get_cached_shell_functions() -> Vec<CommandWordInfo> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     let mut guard = DEFINED_SHELL_FUNCTIONS.lock().unwrap();
     guard
         .get_or_insert_with(|| {
@@ -1836,136 +1326,6 @@ fn get_cached_builtins() -> Vec<CommandWordInfo> {
         .clone()
 }
 
-/// Per-directory executable cache entry: the directory's last-modified time and
-/// the list of executable filenames found in that directory.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DirExecutables {
-    pub mtime: Option<SystemTime>,
-    pub names: Vec<String>,
-}
-
-/// Global cache that maps each directory on `PATH` to its executable names and
-/// the directory's last-modified timestamp.  The cache is **never** invalidated
-/// on app startup; instead it is updated lazily on every access:
-///
-/// 1. Directories that have been removed from `PATH` are evicted from the cache.
-/// 2. Newly-added directories are scanned and inserted.
-/// 3. For each remaining directory the last-modified time is compared to the
-///    cached value; if it has changed the directory is re-scanned.
-pub struct ExecutablesOnPath {
-    cache: HashMap<PathBuf, DirExecutables>,
-}
-
-impl ExecutablesOnPath {
-    fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    /// Compute changes to PATH directories in a background subshell.
-    /// Returns a payload with updated directory scans and current PATH set.
-    pub fn scan_path_updates(path_env: Option<String>) -> PathScanPayload {
-        let current_dirs: Vec<PathBuf> = path_env
-            .map(|p| p.split(':').map(PathBuf::from).collect())
-            .unwrap_or_default();
-
-        let current_dir_set: HashSet<PathBuf> = current_dirs.iter().cloned().collect();
-
-        let guard = EXECUTABLES_ON_PATH
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        let mut updated = HashMap::new();
-        for dir in &current_dirs {
-            let current_mtime = dir.metadata().ok().and_then(|m| m.modified().ok());
-
-            let needs_update = match guard.cache.get(dir) {
-                Some(entry) if entry.mtime == current_mtime => false,
-                _ => true,
-            };
-
-            if needs_update {
-                let names = if current_mtime.is_some() {
-                    Self::scan_dir(dir)
-                } else {
-                    Vec::new()
-                };
-
-                updated.insert(
-                    dir.clone(),
-                    DirExecutables {
-                        mtime: current_mtime,
-                        names,
-                    },
-                );
-            }
-        }
-
-        PathScanPayload {
-            updated,
-            current_dirs: current_dir_set,
-        }
-    }
-
-    /// Apply the subshell's scan results back to the global cache:
-    /// evict removed PATH dirs, and insert newly scanned/updated dirs.
-    pub fn apply_updates(payload: PathScanPayload) {
-        let mut guard = EXECUTABLES_ON_PATH
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        // Evict directories that are no longer on PATH.
-        guard
-            .cache
-            .retain(|dir, _| payload.current_dirs.contains(dir));
-
-        // Update only the directories that were modified or newly added.
-        for (dir, entry) in payload.updated {
-            guard.cache.insert(dir, entry);
-        }
-    }
-
-    /// Iterate over the names of all cached executables.
-    fn iter_info(&self) -> impl Iterator<Item = CommandWordInfo> + '_ {
-        self.cache.iter().flat_map(|(dir, entry)| {
-            entry.names.iter().map(move |name| {
-                let path = dir.join(name).to_string_lossy().into_owned();
-                CommandWordInfo::File {
-                    command: name.clone(),
-                    path,
-                }
-            })
-        })
-    }
-
-    /// Scan `dir` and return the names of all executable files it contains.
-    fn scan_dir(dir: &Path) -> Vec<String> {
-        let mut names = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = std::fs::metadata(entry.path())
-                    && metadata.is_file()
-                {
-                    let permissions = metadata.permissions();
-                    if permissions.mode() & 0o111 != 0 {
-                        if let Some(file_name) = entry.file_name().to_str() {
-                            names.push(file_name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        names
-    }
-}
-
-static EXECUTABLES_ON_PATH: LazyLock<Mutex<ExecutablesOnPath>> =
-    LazyLock::new(|| Mutex::new(ExecutablesOnPath::new()));
-
-pub(crate) static LS_COLORS: LazyLock<Option<LsColors>> =
-    LazyLock::new(|| get_envvar_value("LS_COLORS").map(|s| LsColors::from_string(&s)));
-
 /// Get all potential first word completions (aliases, reserved words, functions, builtins, executables)
 #[cfg(not(test))]
 pub fn get_possible_command_words() -> impl Iterator<Item = CommandWordInfo> {
@@ -2002,7 +1362,7 @@ pub fn get_possible_command_words() -> impl Iterator<Item = CommandWordInfo> {
 
 #[cfg(not(test))]
 pub fn warm_bash_caches() {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     let _ = get_cached_aliases();
     let _ = get_cached_reserved_words();
     let _ = get_cached_shell_functions();
@@ -2012,15 +1372,9 @@ pub fn warm_bash_caches() {
 #[cfg(test)]
 pub fn warm_bash_caches() {}
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PathScanPayload {
-    pub updated: HashMap<std::path::PathBuf, DirExecutables>,
-    pub current_dirs: HashSet<std::path::PathBuf>,
-}
-
 #[cfg(not(test))]
 pub fn read_terminating_signal() -> c_int {
-    unsafe { (&raw const crate::bash_symbols::terminating_signal).read_volatile() }
+    unsafe { (&raw const super::symbols::terminating_signal).read_volatile() }
 }
 
 #[cfg(test)]
@@ -2031,7 +1385,7 @@ pub fn read_terminating_signal() -> c_int {
 #[cfg(not(test))]
 #[allow(dead_code)]
 pub fn set_env_var(name: &str, value: &str) -> Result<()> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let name_cstr = std::ffi::CString::new(name)?;
         let value_cstr = std::ffi::CString::new(value)?;
@@ -2057,7 +1411,7 @@ pub fn set_env_var(name: &str, value: &str) -> Result<()> {
 
 #[cfg(not(test))]
 pub fn export_env_var(name: &str, value: &str) -> Result<()> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let name_cstr = std::ffi::CString::new(name)?;
         let value_cstr = std::ffi::CString::new(value)?;
@@ -2082,7 +1436,7 @@ pub fn export_env_var(name: &str, value: &str) -> Result<()> {
 
 #[cfg(not(test))]
 pub fn unset_env_var(name: &str) -> Result<()> {
-    let _guard = crate::bash_symbols::BASH_LOCK.lock();
+    let _guard = super::symbols::BASH_LOCK.lock();
     unsafe {
         let name_cstr = std::ffi::CString::new(name)?;
         let res = bash_symbols::unbind_variable(name_cstr.as_ptr());
@@ -2106,171 +1460,6 @@ pub fn unset_env_var(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_quote_function() {
-        assert_eq!(
-            quoting_function_rust(r#"qwe asd"#, QuoteType::Backslash, true, true),
-            r#"qwe\ asd"#
-        );
-        assert_eq!(
-            quoting_function_rust(r#"qwe asd"#, QuoteType::DoubleQuote, true, true),
-            r#""qwe asd""#
-        );
-        assert_eq!(
-            quoting_function_rust(r#"qwe asd"#, QuoteType::SingleQuote, true, true),
-            r#"'qwe asd'"#
-        );
-    }
-
-    #[test]
-    fn test_quote_function_harder() {
-        assert_eq!(
-            quoting_function_rust(r#"qwe"asdf"#, QuoteType::Backslash, true, true),
-            r#"qwe\"asdf"#
-        );
-        assert_eq!(
-            quoting_function_rust(r#"qwe"asdf"#, QuoteType::DoubleQuote, true, true),
-            r#""qwe\"asdf""#
-        );
-    }
-
-    #[test]
-    fn test_quote_function_backslash_special_chars() {
-        for &c in BACKSLASH_SPECIAL_CHARS {
-            let input = format!("a{}b", c);
-            let expected = format!("a\\{}b", c);
-            assert_eq!(
-                quoting_function_rust(&input, QuoteType::Backslash, true, true),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_quote_function_double_quote_special_chars() {
-        for &c in DOUBLE_QUOTE_SPECIAL_CHARS {
-            let input = format!("a{}b", c);
-            let expected_inner = format!("a\\{}b", c);
-            let expected = format!("\"{}\"", expected_inner);
-            assert_eq!(
-                quoting_function_rust(&input, QuoteType::DoubleQuote, true, true),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn test_dequoting_function() {
-        assert_eq!(dequoting_function_rust(r#"qwe\ asd"#), r#"qwe asd"#);
-        assert_eq!(dequoting_function_rust(r#""qwe asd""#), r#"qwe asd"#);
-        assert_eq!(dequoting_function_rust(r#"'qwe asd'"#), r#"qwe asd"#);
-        assert_eq!(dequoting_function_rust(r#"abc"#), r#"abc"#);
-    }
-
-    #[test]
-    fn test_dequoting_function_harder() {
-        assert_eq!(dequoting_function_rust(r#"qwe\"asdf"#), r#"qwe"asdf"#);
-        assert_eq!(dequoting_function_rust(r#""qwe\"asdf""#), r#"qwe"asdf"#);
-        assert_eq!(dequoting_function_rust(r#""""#), r#""#);
-    }
-
-    #[test]
-    fn test_find_quotes() {
-        assert_eq!(
-            find_quote_type(r#""qwe asdf"#),
-            Some(QuoteType::DoubleQuote)
-        );
-        assert_eq!(
-            find_quote_type(r#"'qwe asdf"#),
-            Some(QuoteType::SingleQuote)
-        );
-        assert_eq!(find_quote_type(r#"qwe\ asdf"#), Some(QuoteType::Backslash));
-        assert_eq!(find_quote_type(r#"qwe asdf"#), None);
-        assert_eq!(find_quote_type(r#"qwe\\asdf"#), None);
-    }
-
-    #[test]
-    fn test_detect_and_convert_inline_descriptions() {
-        let mut flags = CompletionFlags::default();
-        flags.filename_completion_desired = false;
-
-        // 1. A typical aligned list of options with descriptions.
-        let mut comps = vec![
-            "port      List port mappings".to_string(),
-            "ps        List containers".to_string(),
-        ];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "port\tList port mappings");
-        assert_eq!(comps[1], "ps\tList containers");
-
-        // 2. An aligned list of options where some descriptions are single words.
-        let mut comps = vec![
-            "-d      Decompress".to_string(),
-            "-z      Compress".to_string(),
-        ];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "-d\tDecompress");
-        assert_eq!(comps[1], "-z\tCompress");
-
-        // 3. A single option with a description (containing a space).
-        let mut comps = vec!["port      List port mappings".to_string()];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "port\tList port mappings");
-
-        // 4. A single option with a single-word description starting with a flag.
-        let mut comps = vec!["-d      Decompress".to_string()];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "-d\tDecompress");
-
-        // 5. A single option with a single-word description (not a flag).
-        // Should NOT convert to avoid false positives (e.g. "my  file.txt" or "build  Build" when it is the only completion).
-        let mut comps = vec!["build      Build".to_string()];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "build      Build");
-
-        // 6. Filename completion desired - should skip.
-        let mut comps = vec![
-            "port      List port mappings".to_string(),
-            "ps        List containers".to_string(),
-        ];
-        let mut file_flags = CompletionFlags::default();
-        file_flags.filename_completion_desired = true;
-        detect_and_convert_inline_descriptions(&mut comps, &file_flags);
-        assert_eq!(comps[0], "port      List port mappings");
-
-        // 7. Non-aligned filenames (different lengths, double spaces).
-        // Should NOT convert.
-        let mut comps = vec!["my  file.txt".to_string(), "another  file.txt".to_string()];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "my  file.txt");
-        assert_eq!(comps[1], "another  file.txt");
-
-        // 8. Arbitrary string with spaces in the value part (e.g. "my file      description").
-        // Value part contains spaces, so it's not a strict completion value, should NOT convert.
-        let mut comps = vec!["my file      description".to_string()];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "my file      description");
-
-        // 9. One completion already contains a tab character.
-        // Should NOT convert any of them.
-        let mut comps = vec![
-            "port\tList port mappings".to_string(),
-            "ps      List containers".to_string(),
-        ];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "port\tList port mappings");
-        assert_eq!(comps[1], "ps      List containers");
-
-        // 10. Descriptions wrapped in parentheses should be stripped.
-        let mut comps = vec![
-            "port      (List port mappings)".to_string(),
-            "ps        (List containers)".to_string(),
-        ];
-        detect_and_convert_inline_descriptions(&mut comps, &flags);
-        assert_eq!(comps[0], "port\tList port mappings");
-        assert_eq!(comps[1], "ps\tList containers");
-    }
 
     #[test]
     fn test_resolve_and_write_completion_script() {
@@ -2518,7 +1707,7 @@ pub fn is_autocd_enabled() -> bool {
     }
     #[cfg(all(not(test), not(feature = "pre_bash_4_4")))]
     {
-        let _guard = crate::bash_symbols::BASH_LOCK.lock();
+        let _guard = super::symbols::BASH_LOCK.lock();
         unsafe { bash_symbols::autocd != 0 }
     }
 }
