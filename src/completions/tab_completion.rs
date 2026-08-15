@@ -91,7 +91,7 @@ fn run_comp_spec_completion(
 
         match poss_completions {
             Ok(comp_result) => {
-                log::debug!(
+                log::trace!(
                     "Programmable completion results for command: {}",
                     alias_expanded_full_command
                 );
@@ -263,10 +263,6 @@ fn gen_completions_uncomitted(
                 }
             }
             CompType::FuzzyFirstWord => {
-                log::debug!(
-                    "CompType::FuzzyFirstWord for: {}",
-                    word_under_cursor.as_ref()
-                );
                 let completions = tab_complete_fuzzy_first_word(word_under_cursor.as_ref());
                 log::debug!(
                     "CompType::FuzzyFirstWord found {} completions for prefix: {}",
@@ -375,7 +371,6 @@ fn gen_completions_uncomitted(
             }
 
             CompType::EnvVariable => {
-                log::debug!("CompType::EnvVariable for {}", word_under_cursor.as_ref());
                 let matching_vars = shell::backend().vars_with_prefix(word_under_cursor.as_ref());
                 log::debug!(
                     "CompType::EnvVariable found {} completions for prefix: {}",
@@ -397,10 +392,6 @@ fn gen_completions_uncomitted(
                 }
             }
             CompType::HostnameExpansion => {
-                log::debug!(
-                    "CompType::HostnameExpansion for {}",
-                    word_under_cursor.as_ref()
-                );
                 let completions = tab_complete_hostname_expansion(word_under_cursor.as_ref());
                 log::debug!(
                     "CompType::HostnameExpansion found {} completions for pattern: {}",
@@ -415,10 +406,6 @@ fn gen_completions_uncomitted(
                 }
             }
             CompType::TildeExpansion => {
-                log::debug!(
-                    "CompType::TildeExpansion for {}",
-                    word_under_cursor.as_ref()
-                );
                 let completions = tab_complete_tilde_expansion(word_under_cursor.as_ref());
                 log::debug!(
                     "CompType::TildeExpansion found {} completions for pattern: {}",
@@ -432,19 +419,41 @@ fn gen_completions_uncomitted(
                     );
                 }
             }
-            CompType::GlobExpansion => {
-                if auto_started {
-                    log::debug!("Skipping GlobExpansion because auto_started is true");
-                    continue;
+            // This shows a preview of what the glob expansion would be
+            CompType::GlobExpansion if auto_started => {
+                let (completions, _comp_res_flags) = tab_complete_glob_expansion(
+                    word_under_cursor.as_ref(),
+                    word_under_cursor.as_ref(),
+                );
+
+                log::debug!(
+                    "CompType::GlobExpansion auto start found {} completions for pattern: {}",
+                    completions.len(),
+                    word_under_cursor.as_ref()
+                );
+                match completions.as_slice() {
+                    [] => {}
+                    _ => {
+                        return Some(
+                            ActiveSuggestionsBuilder::from_processed(
+                                completions
+                                    .into_iter()
+                                    .map(|c| c.into_processed())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .with_comp_type(comp_type.clone()),
+                        );
+                    }
                 }
-                log::debug!("CompType::GlobExpansion for {}", word_under_cursor.as_ref());
+            }
+            CompType::GlobExpansion => {
                 let (completions, comp_res_flags) = tab_complete_glob_expansion(
                     word_under_cursor.as_ref(),
                     word_under_cursor.as_ref(),
                 );
 
                 log::debug!(
-                    "CompType::GlobExpansion found {} completions for pattern: {}",
+                    "CompType::GlobExpansion manual start found {} completions for pattern: {}",
                     completions.len(),
                     word_under_cursor.as_ref()
                 );
@@ -508,10 +517,6 @@ fn gen_completions_uncomitted(
                     );
                     continue;
                 }
-                log::debug!(
-                    "CompType::FilenameExpansion for: {}",
-                    word_under_cursor.as_ref()
-                );
                 let (completions, _comp_res_flags) = tab_complete_glob_expansion(
                     &(completion_context.word_left_of_cursor().to_string()
                         + "*"
@@ -541,10 +546,6 @@ fn gen_completions_uncomitted(
                     );
                     continue;
                 }
-                log::debug!(
-                    "CompType::FuzzyFilenameExpansion for: {}",
-                    word_under_cursor.as_ref()
-                );
                 let (completions, _comp_res_flags) =
                     tab_complete_fuzzy_filename(completion_context);
 
@@ -770,7 +771,7 @@ fn tab_complete_glob_expansion(
     comp_resultflags.filename_completion_desired = true;
 
     comp_resultflags.quote_type = shell::find_quote_type(pattern);
-    log::debug!("found quote type: {:?}", comp_resultflags.quote_type);
+    log::trace!("found quote type: {:?}", comp_resultflags.quote_type);
 
     let expanded = PathPatternExpansion::new(pattern);
     let completions =
