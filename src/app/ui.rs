@@ -1680,7 +1680,7 @@ impl<'a> App<'a> {
         let pos_string = active_suggestions
             .current_1d_index()
             .map(|idx| idx.saturating_add(1).to_string())
-            .unwrap_or_else(|| "-".to_string());
+            .unwrap_or_else(|| " ".to_string());
 
         content.write_tagged_span(&TaggedSpan::new(
             Span::styled(
@@ -1775,7 +1775,7 @@ impl<'a> App<'a> {
         let pos_string = active_suggestions
             .current_1d_index()
             .map(|idx| idx.saturating_add(1).to_string())
-            .unwrap_or_else(|| "-".to_string());
+            .unwrap_or_else(|| " ".to_string());
 
         let status_prefix = format!(
             "{}/{}; ",
@@ -2734,7 +2734,7 @@ mod tests {
                 "                                        ".to_string(),
                 "╭────────────╮                          ".to_string(),
                 "│sug1        │                          ".to_string(),
-                "╰─-/1; 0.0ms─╯                          ".to_string(),
+                "╰─ /1; 0.0ms─╯                          ".to_string(),
                 "                                        ".to_string(),
                 "                                        ".to_string(),
                 "     X                                  ".to_string(),
