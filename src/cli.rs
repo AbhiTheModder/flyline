@@ -631,6 +631,17 @@ enum Commands {
     ///   flyline upgrade
     #[command(name = "upgrade", verbatim_doc_comment)]
     Upgrade,
+    /// View active session settings and inspect differences from defaults.
+    ///
+    /// Examples:
+    ///   flyline settings
+    ///   flyline settings --all
+    #[command(name = "settings", hide = true, verbatim_doc_comment)]
+    Settings {
+        /// Show all settings, including those at their default values.
+        #[arg(long = "all")]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1716,6 +1727,9 @@ impl Flyline {
                         );
                         self.settings.initial_buffer = Some("source <(curl -sSfL https://github.com/HalFrgrd/flyline/releases/latest/download/install.sh)".to_string());
                     }
+                    Some(Commands::Settings { all }) => {
+                        show_settings(&self.settings, all);
+                    }
                 }
 
                 shell::BuiltinExitCode::ExecutionSuccess as c_int
@@ -2040,6 +2054,48 @@ fn show_version(copy: bool) {
     }
 }
 
+fn show_settings(settings: &settings::Settings, all: bool) {
+    let diff = settings.diff();
+    let entries: Vec<_> = diff.into_iter().filter(|e| all || !e.is_default).collect();
+
+    if entries.is_empty() {
+        println!("All flyline settings are at their default values.");
+        println!("Use 'flyline settings --all' to view all settings.");
+        return;
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        if !termina::style::Stylized::is_ansi_color_disabled() {
+            use termina::escape::csi::{Csi, Sgr};
+            use termina::style::ColorSpec;
+            println!(
+                "{}{}{}",
+                Csi::Sgr(Sgr::Foreground(ColorSpec::GREEN)),
+                entry.name,
+                Csi::Sgr(Sgr::Reset)
+            );
+        } else {
+            println!("{}", entry.name);
+        }
+        print_setting_val("Current", &entry.current);
+        print_setting_val("Default", &entry.default);
+    }
+}
+
+fn print_setting_val(label: &str, val: &str) {
+    if val.contains('\n') {
+        println!("  {label}:");
+        for line in val.lines() {
+            println!("    {line}");
+        }
+    } else {
+        println!("  {label}: {val}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2185,5 +2241,20 @@ mod tests {
         let args_default =
             FlylineArgs::try_parse_from(["flyline", "--enable-easter-eggs"]).unwrap();
         assert_eq!(args_default.enable_easter_eggs, Some(true));
+    }
+
+    #[test]
+    fn test_flyline_settings_command_parse() {
+        let args = FlylineArgs::try_parse_from(["flyline", "settings"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Commands::Settings { all: false })
+        ));
+
+        let args_all = FlylineArgs::try_parse_from(["flyline", "settings", "--all"]).unwrap();
+        assert!(matches!(
+            args_all.command,
+            Some(Commands::Settings { all: true })
+        ));
     }
 }

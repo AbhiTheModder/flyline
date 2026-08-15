@@ -60,7 +60,7 @@ pub enum FuzzyMode {
 }
 
 /// A single custom prompt animation registered with `flyline create-prompt-widget animation`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PromptAnimation {
     /// Name used as placeholder in prompt strings (e.g., `COOL_SPINNER`).
     pub name: String,
@@ -74,7 +74,7 @@ pub struct PromptAnimation {
 }
 
 /// A custom prompt widget registered with `flyline create-prompt-widget`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PromptWidget {
     /// Show different text depending on whether mouse capture is enabled.
     MouseMode {
@@ -136,7 +136,7 @@ impl PromptWidget {
 
 /// What to show as a placeholder while a non-blocking (or timed-out blocking)
 /// custom widget command is still running.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum Placeholder {
     /// Show N spaces.
     Spaces(usize),
@@ -146,7 +146,7 @@ pub enum Placeholder {
 }
 
 /// A prompt widget that runs a shell command and displays its output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PromptWidgetCustom {
     /// Name used as placeholder in prompt strings (e.g., `CUSTOM_WIDGET1`).
     pub name: String,
@@ -163,11 +163,12 @@ pub struct PromptWidgetCustom {
     pub placeholder: Placeholder,
     /// Most recent successful output of the command; shared across clones so
     /// that the `Placeholder::Prev` option can pick it up on subsequent renders.
+    #[serde(skip)]
     pub prev_output: std::sync::Arc<std::sync::Mutex<Vec<TaggedSpan<'static>>>>,
 }
 
 /// A configured agent-mode command with its optional system prompt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentModeCommand {
     /// Command (and arguments) to invoke. The current buffer is appended as the
     /// final argument.  Stored as a `Vec<String>` after splitting the
@@ -179,7 +180,7 @@ pub struct AgentModeCommand {
 }
 
 /// Controls whether and when the matrix animation is shown.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MatrixAnimation {
     /// Never show the matrix animation.
     #[default]
@@ -192,7 +193,17 @@ pub enum MatrixAnimation {
 }
 
 /// Controls how flyline manages mouse capture.
-#[derive(clap::ValueEnum, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(
+    clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MouseMode {
     /// Never capture mouse events.
     Disabled,
@@ -206,7 +217,17 @@ pub enum MouseMode {
 }
 
 /// How many shell integration escape codes (OSC 133 / OSC 633) flyline sends.
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ShellIntegrationLevel {
     /// Send no shell integration codes.
     None,
@@ -218,7 +239,17 @@ pub enum ShellIntegrationLevel {
     Full,
 }
 
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(
+    clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ResizeLogic {
     /// Automatically decide based on terminal emulator (default).
     #[default]
@@ -247,15 +278,17 @@ impl ResizeLogic {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct Settings {
     /// Optional path to the Zsh history file. When `None`, Zsh history is not loaded.
     /// When `Some`, Zsh history is loaded in addition to Bash history; an empty string or no
     /// value means use the default path (`$HOME/.zsh_history`).
+    #[serde(rename = "history.zsh_path")]
     pub zsh_history_path: Option<String>,
     /// Whether the interactive tutorial is active.
     pub run_tutorial: bool,
     /// Current tutorial step.
+    #[serde(skip)]
     pub tutorial_step: TutorialStep,
     /// Whether to show all animations (cursor movement, cursor fading, dynamic time).
     pub show_animations: bool,
@@ -264,6 +297,7 @@ pub struct Settings {
     /// Whether to auto-start tab completion suggestions as you type.
     pub auto_suggest: bool,
     /// Settings for flycomp shell completion synthesis.
+    #[serde(rename = "flycomp")]
     pub flycomp: flycomp::FlycompSettings,
     /// How to sort suggestions when fuzzy scores are tied.
     pub suggestion_sort_order: SuggestionSortOrder,
@@ -278,6 +312,7 @@ pub struct Settings {
     /// does not change the buffer selection or cursor position.
     pub select_with_mouse: bool,
     /// Cursor appearance and animation settings (set via `flyline set-cursor`).
+    #[serde(rename = "cursor")]
     pub cursor_config: CursorConfig,
     /// Mouse capture mode.
     pub mouse_mode: MouseMode,
@@ -285,6 +320,7 @@ pub struct Settings {
     /// - `None` key: the default command invoked via Alt+Enter (no prefix match needed).
     /// - `Some(prefix)` key: activated when the user presses Enter and the buffer starts
     ///   with `prefix`; the prefix is stripped before the buffer is sent to the command.
+    #[serde(serialize_with = "serialize_agent_commands")]
     pub agent_commands: HashMap<Option<String>, AgentModeCommand>,
     /// Custom prompt animations registered with `flyline create-prompt-widget animation`.
     pub custom_animations: HashMap<String, PromptAnimation>,
@@ -305,10 +341,13 @@ pub struct Settings {
     /// Enabled by default; pass `--enable-easter-eggs false` to disable.
     pub enable_easter_eggs: bool,
     /// Configurable colour palette for UI elements.
+    #[serde(rename = "palette")]
     pub colour_palette: Palette,
     /// User defined keybindings
+    #[serde(serialize_with = "serialize_keybindings")]
     pub keybindings: Vec<actions::Binding>,
     /// User defined key remappings (applied before matching bindings).
+    #[serde(serialize_with = "serialize_key_remappings")]
     pub key_remappings: Vec<actions::KeyRemap>,
     /// Whether built-in default keybindings should be ignored.
     pub clear_default_keybindings: bool,
@@ -319,22 +358,31 @@ pub struct Settings {
     /// Whether to change the mouse cursor shape depending on what is hovered.
     pub mouse_change_shape: bool,
     /// Tracks commands that were cancelled via Ctrl+C (non-empty buffer).
+    #[serde(skip)]
     pub cancelled_command_history_manager: HistoryManager,
     /// Tracks prompts that were submitted to agent mode.
+    #[serde(skip)]
     pub agent_prompt_history_manager: HistoryManager,
     /// Timestamp of the most recent flyline app session close.
     ///
     /// Set to `Some(Instant::now())` immediately after each `app::get_command`
     /// call returns. Used by the `last-command-duration` prompt widget to
     /// compute and display the elapsed time since the last command.
+    #[serde(skip)]
     pub last_app_closed_at: Option<std::time::Instant>,
     /// Initial buffer content to pre-fill the command line when Flyline starts.
+    #[serde(skip)]
     pub initial_buffer: Option<String>,
     /// Resize logic strategy for cursor placement on window resize.
     pub resize_logic: ResizeLogic,
     /// Configured history storage backend (flyline, bash, or atuin).
+    #[serde(rename = "history.backend")]
     pub history_backend: HistoryBackend,
     /// Long-lived main command history manager.
+    #[serde(
+        rename = "history.jsonl_path",
+        serialize_with = "serialize_history_manager"
+    )]
     pub history_manager: HistoryManager,
 }
 
@@ -378,5 +426,209 @@ impl Default for Settings {
             history_backend: HistoryBackend::default(),
             history_manager: HistoryManager::default(),
         }
+    }
+}
+
+/// A single diff entry between current session settings and default settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingDiffEntry {
+    /// Setting name / field.
+    pub name: String,
+    /// String representation of the current value.
+    pub current: String,
+    /// String representation of the default value.
+    pub default: String,
+    /// Whether the setting is currently at its default value.
+    pub is_default: bool,
+}
+
+impl Settings {
+    /// Computes the diff between this `Settings` instance and `Settings::default()`.
+    pub fn diff(&self) -> Vec<SettingDiffEntry> {
+        let curr_val = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        let def_val = serde_json::to_value(Settings::default()).unwrap_or(serde_json::Value::Null);
+
+        let mut curr_flat = Vec::new();
+        let mut def_flat = Vec::new();
+        flatten_json("", &curr_val, &mut curr_flat);
+        flatten_json("", &def_val, &mut def_flat);
+
+        let def_map: std::collections::HashMap<_, _> = def_flat.into_iter().collect();
+
+        let mut entries = Vec::new();
+        for (key, val) in curr_flat {
+            let d_val = def_map.get(&key).unwrap_or(&serde_json::Value::Null);
+            entries.push(SettingDiffEntry {
+                name: key,
+                current: format_json_val(&val),
+                default: format_json_val(d_val),
+                is_default: &val == d_val,
+            });
+        }
+        entries
+    }
+}
+
+fn flatten_json(prefix: &str, val: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+    match val {
+        serde_json::Value::Object(obj) => {
+            for (k, v) in obj {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_json(&key, v, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push((prefix.to_string(), val.clone()));
+            }
+        }
+    }
+}
+
+fn format_json_val(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()),
+    }
+}
+
+fn serialize_agent_commands<S>(
+    commands: &HashMap<Option<String>, AgentModeCommand>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(commands.len()))?;
+    for (k, v) in commands {
+        let key_str = k.as_deref().unwrap_or("<default>");
+        map.serialize_entry(key_str, v)?;
+    }
+    map.end()
+}
+
+fn serialize_keybindings<S>(bindings: &[actions::Binding], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(bindings.len()))?;
+    for b in bindings {
+        seq.serialize_element(&b.display())?;
+    }
+    seq.end()
+}
+
+fn serialize_key_remappings<S>(
+    remappings: &[actions::KeyRemap],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(remappings.len()))?;
+    for r in remappings {
+        seq.serialize_element(&r.display())?;
+    }
+    seq.end()
+}
+
+fn serialize_history_manager<S>(
+    history_manager: &HistoryManager,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize;
+    history_manager
+        .jsonl_path()
+        .display()
+        .to_string()
+        .serialize(serializer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_settings_diff_default_has_no_non_defaults() {
+        let settings = Settings::default();
+        let diff = settings.diff();
+        let changed: Vec<_> = diff.iter().filter(|e| !e.is_default).collect();
+        assert!(
+            changed.is_empty(),
+            "Expected no changed settings on default Settings, got: {:?}",
+            changed
+        );
+    }
+
+    #[test]
+    fn test_settings_diff_detects_changed_editor_setting() {
+        let mut settings = Settings::default();
+        settings.auto_close_chars = false;
+        settings.num_suggestion_rows = 8;
+        let diff = settings.diff();
+        let changed: Vec<_> = diff.iter().filter(|e| !e.is_default).collect();
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[0].name, "num_suggestion_rows");
+        assert_eq!(changed[0].current, "8");
+        assert_eq!(changed[0].default, "15");
+        assert_eq!(changed[1].name, "auto_close_chars");
+        assert_eq!(changed[1].current, "false");
+        assert_eq!(changed[1].default, "true");
+    }
+
+    #[test]
+    fn test_settings_diff_detects_custom_palette() {
+        let mut settings = Settings::default();
+        settings.colour_palette.set(
+            crate::palette::PaletteStyleKind::RecognisedCommand,
+            ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+        );
+        let diff = settings.diff();
+        let changed: Vec<_> = diff.iter().filter(|e| !e.is_default).collect();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].name, "palette.recognised_command.fg");
+        assert_eq!(changed[0].current, "Yellow");
+    }
+
+    #[test]
+    fn test_settings_diff_detects_changed_history_jsonl_path() {
+        let mut settings = Settings::default();
+        settings
+            .history_manager
+            .set_jsonl_history_path(std::path::PathBuf::from("/tmp/test.jsonl"));
+        let diff = settings.diff();
+        let changed: Vec<_> = diff.iter().filter(|e| !e.is_default).collect();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].name, "history.jsonl_path");
+        assert_eq!(changed[0].current, "/tmp/test.jsonl");
+    }
+
+    #[test]
+    fn test_settings_diff_detects_custom_keybinding() {
+        let mut settings = Settings::default();
+        let binding = actions::Binding::try_new_from_strs("ctrl+a", "always=selectAll").unwrap();
+        settings.keybindings.push(binding);
+        let diff = settings.diff();
+        let changed: Vec<_> = diff.iter().filter(|e| !e.is_default).collect();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].name, "keybindings");
+        assert!(
+            changed[0].current.contains("Ctrl+a always=selectAll"),
+            "Expected pretty binding string, got: {}",
+            changed[0].current
+        );
     }
 }
