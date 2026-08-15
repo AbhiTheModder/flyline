@@ -29,7 +29,19 @@ use crate::shell::bash::{funcs as bash_funcs, symbols as bash_symbols};
 mod changelog;
 mod cli;
 pub mod completions;
-pub mod content;
+pub mod tag;
+pub mod content {
+    pub use crate::tag::*;
+    pub use flycontent::builder::{Coord, RelativePosition, reset_matrix_anim_state};
+    pub use flycontent::easing;
+    pub use flycontent::palette;
+    pub use flycontent::sliding_window::*;
+    pub use flycontent::snake_animation::*;
+    pub use flycontent::table::*;
+    pub use flycontent::unicode::*;
+    pub use flycontent::utils::*;
+}
+pub use flycontent::palette;
 mod cursor;
 mod globbing;
 pub mod grammar;
@@ -39,7 +51,6 @@ mod iter_first_last;
 mod kill_on_drop_child;
 mod logging;
 mod mouse_state;
-mod palette;
 pub mod path;
 mod prompt_manager;
 mod settings;
@@ -50,6 +61,8 @@ pub mod term_info;
 mod text_buffer;
 mod tutorial;
 mod users;
+
+pub use tag::{ClipboardTypes, Contents, Tag, TaggedCell, TaggedLine, TaggedSpan};
 
 pub use completions::context as tab_completion_context;
 pub use grammar::command_acceptance;
