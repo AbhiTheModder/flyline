@@ -557,7 +557,7 @@ impl<'a> App<'a> {
             t.elapsed() < std::time::Duration::from_millis(1000)
         });
 
-        let (mut lprompt, rprompt, fill_span) = self.prompt_manager.get_ps1_lines(
+        let (mut lprompt, rprompt, fill_span, prompt_ruler) = self.prompt_manager.get_ps1_lines(
             self.settings.show_animations,
             mouse_state(|m| m.is_enabled()),
             leader_active,
@@ -599,6 +599,20 @@ impl<'a> App<'a> {
             }
         }
 
+        let mut prompt_ruler = prompt_ruler;
+        if copy_buffer_active {
+            if let Some(crate::prompt_manager::FormattedPromptRuler::Line(ruler_line)) =
+                &mut prompt_ruler
+            {
+                for span in &mut ruler_line.spans {
+                    if span.tag == SpanTag::Constant(Tag::PromptCopyBufferWidget) {
+                        span.span.style =
+                            Palette::apply_button_style(span.span.style, copy_buffer_state);
+                    }
+                }
+            }
+        }
+
         // When in PromptCwdEdit mode, highlight the selected CWD path segment.
         if self.mode.is_running()
             && let ContentMode::PromptDirSelect(cwd_index) = self.content_mode
@@ -631,6 +645,23 @@ impl<'a> App<'a> {
         }
 
         let empty_tagged_line = TaggedLine::default();
+
+        if let Some(ruler) = &prompt_ruler {
+            match ruler {
+                crate::prompt_manager::FormattedPromptRuler::EmptyLine => {
+                    content.newline();
+                }
+                crate::prompt_manager::FormattedPromptRuler::Line(ruler_line) => {
+                    content.write_tagged_line_lrjustified(
+                        &empty_tagged_line,
+                        ruler_line,
+                        &empty_tagged_line,
+                        false,
+                    );
+                    content.newline();
+                }
+            }
+        }
         for (_, is_last, either_or_both) in
             lprompt.iter().zip_longest(rprompt.iter()).flag_first_last()
         {
@@ -669,6 +700,11 @@ impl<'a> App<'a> {
             + 1;
         let max_digits = total_lines.to_string().len();
 
+        let is_cancelled = matches!(
+            self.mode,
+            AppRunningState::Exiting(ExitState::WithoutCommand)
+        );
+
         for part in self.formatted_buffer_cache.parts.iter() {
             let animation_time = if self.mode.is_running() && self.settings.show_animations {
                 Some(now)
@@ -679,7 +715,9 @@ impl<'a> App<'a> {
             for (mut sub_span, tags, is_cursor, _is_sel_byte, is_in_selection) in
                 part.get_spans(animation_time, selection_range.clone())
             {
-                if is_in_selection {
+                if is_cancelled {
+                    sub_span.style = self.settings.colour_palette.secondary_text();
+                } else if is_in_selection {
                     sub_span.style = self
                         .settings
                         .colour_palette
@@ -1639,24 +1677,15 @@ impl<'a> App<'a> {
             }
         }
 
-        let pos_string = if active_suggestions.last_num_data_cols > 1 {
-            match active_suggestions.selected_coord {
-                Some((selected_col, selected_row)) => {
-                    format!("({}, {})", selected_col, selected_row)
-                }
-                None => "(-)".to_string(),
-            }
-        } else {
-            active_suggestions
-                .current_1d_index()
-                .map(|idx| idx.to_string())
-                .unwrap_or_else(|| "-".to_string())
-        };
+        let pos_string = active_suggestions
+            .current_1d_index()
+            .map(|idx| idx.saturating_add(1).to_string())
+            .unwrap_or_else(|| "-".to_string());
 
         content.write_tagged_span(&TaggedSpan::new(
             Span::styled(
                 format!(
-                    "# Pos: {}; Filtered: {}/{}; ",
+                    "# {}/{}; Total: {}; ",
                     pos_string,
                     active_suggestions.filtered_suggestions_len(),
                     active_suggestions.all_suggestions_len(),
@@ -1749,7 +1778,7 @@ impl<'a> App<'a> {
             .unwrap_or_else(|| "-".to_string());
 
         let status_prefix = format!(
-            " Pos: {}/{}; ",
+            "{}/{}; ",
             pos_string,
             active_suggestions.filtered_suggestions_len(),
         );
@@ -2467,7 +2496,7 @@ mod tests {
                 "│sug2                                  │".to_string(),
                 "│sug3                                  │".to_string(),
                 "│sug4                                  │".to_string(),
-                "╰─ Pos: 1/5; 0.0ms─────────────────────╯".to_string(),
+                "╰─1/5; 0.0ms───────────────────────────╯".to_string(),
                 "                                        ".to_string(),
             ]
         );
@@ -2546,7 +2575,7 @@ mod tests {
                 "╭──────────────────────────────────────╮".to_string(),
                 "│sug1                             desc1│".to_string(),
                 "│sug2  this description is very long a…│".to_string(),
-                "╰─ Pos: 1/2; 0.0ms─────────────────────╯".to_string(),
+                "╰─1/2; 0.0ms───────────────────────────╯".to_string(),
                 "                                        ".to_string(),
             ]
         );
@@ -2616,7 +2645,7 @@ mod tests {
                 "│sug1  this description is medium-long │".to_string(),
                 "│and wraps to exactly two rows         │".to_string(),
                 "│sug2                             desc2│".to_string(),
-                "╰─ Pos: 1/2; 0.0ms─────────────────────╯".to_string(),
+                "╰─1/2; 0.0ms───────────────────────────╯".to_string(),
                 "                                        ".to_string(),
             ]
         );
@@ -2703,9 +2732,9 @@ mod tests {
             content.get_buffer_lines(),
             vec![
                 "                                        ".to_string(),
-                "╭──────────────────╮                    ".to_string(),
-                "│sug1              │                    ".to_string(),
-                "╰─ Pos: -/1; 0.0ms─╯                    ".to_string(),
+                "╭────────────╮                          ".to_string(),
+                "│sug1        │                          ".to_string(),
+                "╰─-/1; 0.0ms─╯                          ".to_string(),
                 "                                        ".to_string(),
                 "                                        ".to_string(),
                 "     X                                  ".to_string(),
