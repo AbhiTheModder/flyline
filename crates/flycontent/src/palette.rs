@@ -436,10 +436,8 @@ impl Palette {
             unrecognised_command: Style::default().fg(Color::Red).bold(),
             single_quoted_text: Style::default().fg(Color::Magenta),
             double_quoted_text: Style::default().fg(Color::Magenta),
-            secondary_text: Style::default().dim().bold(),
-            inline_suggestion: Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::ITALIC),
+            secondary_text: Style::default(),
+            inline_suggestion: Style::default().fg(Color::Cyan),
             tutorial_hint: Style::default().add_modifier(Modifier::BOLD),
             matching_char: Style::default()
                 .fg(Color::Blue)
@@ -472,10 +470,10 @@ impl Palette {
             right_click_menu: Style::default().fg(Color::Black).bg(Color::Gray),
             scrollbar: Style::default().fg(Color::Black).bg(Color::Gray),
             rainbow_brackets: [
-                Style::default().fg(Color::Rgb(180, 120, 0)), // dark gold
-                Style::default().fg(Color::Rgb(180, 30, 30)), // deep red
-                Style::default().fg(Color::Rgb(30, 100, 200)), // deep blue
-                Style::default().fg(Color::Rgb(30, 130, 60)), // dark green
+                Style::default().fg(Color::Yellow),
+                Style::default().fg(Color::Green),
+                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::Blue),
             ],
         }
     }
