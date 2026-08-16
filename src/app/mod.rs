@@ -1251,6 +1251,8 @@ impl<'a> App<'a> {
             self.with_cooked_terminal(|_| {
                 shell::backend().run_pending_traps();
             });
+            self.on_possible_buffer_change();
+
             true
         } else {
             false
