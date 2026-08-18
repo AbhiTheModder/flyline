@@ -24,8 +24,8 @@ tui-scrollbar = "0.2"
 unicode-segmentation = "1.13"
 unicode-width = { version = "0.2", default-features = false }
 
-ansi-to-tui = { git = "https://github.com/HalFrgrd/ansi-to-tui.git", rev = "9191cc682bc7042f6a0bdfbc762d94f99a42fc30" }
-ratatui = { git = "https://github.com/HalFrgrd/ratatui.git", rev = "5f6cdc300dbe12298e9875b8e58879cf1d648ccc", default-features = false, features = ["macros", "serde", "termina", "unstable-backend-writer", "unstable-rendered-line-info"] }
+ansi-to-tui = { git = "https://github.com/HalFrgrd/ansi-to-tui.git", rev = "54d4802472748252223f9478e57870edfde8651f" }
+ratatui = { git = "https://github.com/HalFrgrd/ratatui.git", rev = "067877a9bdfa60d7adb661cda19c88851e84f1a5", default-features = false, features = ["macros", "serde", "termina", "unstable-backend-writer", "unstable-rendered-line-info"] }
 skim = { git = "https://github.com/HalFrgrd/skim", rev = "7908ee85a5f6cd49575925fcc0bdef3999409d26", default-features = false, features = ["algos_only"] }
 termina = { git = "https://github.com/HalFrgrd/termina.git", rev = "5b67693f2c5173c61a13d18517e2cebfc96a6a9d" }
 
@@ -115,5 +115,5 @@ dockerfile = "docker/cross/x86_64-linux-android.Dockerfile"
 dockerfile = "docker/cross/x86_64-unknown-linux-gnu.Dockerfile"
 
 [patch.crates-io]
-ratatui-core = { git = "https://github.com/HalFrgrd/ratatui.git", rev = "5f6cdc300dbe12298e9875b8e58879cf1d648ccc" }
+ratatui-core = { git = "https://github.com/HalFrgrd/ratatui.git", rev = "067877a9bdfa60d7adb661cda19c88851e84f1a5" }
 termina = { git = "https://github.com/HalFrgrd/termina.git", rev = "5b67693f2c5173c61a13d18517e2cebfc96a6a9d" }

@@ -90,6 +90,12 @@ pub(crate) const CHANGELOG: &str = r#"# Changelog
 - **Signal & trap execution**: Run pending shell traps and hooks to immediately reflect styling and variable updates.
 - **Fork, don't thread**: Look ma, no threads! Run slow tasks in forks to prevent memory allocator conflicts with host Bash.
 - **Light mode enhancements**: Better cursor fading and defaults.
+
+## v1.8.0 (TBD)
+- **Print current settings**: Added `flyline settings`
+- **Git ref last modify time**: Suggestions now show the last modified time of git branches, tags, etc.
+- **JSONL history backend**: `flyline history --backend jsonl` to store history in a JSONL file for cross session syncing. Right click on a history to see extra metadata.
+
 "#;
 
 pub(crate) fn pretty_changelog() -> String {
