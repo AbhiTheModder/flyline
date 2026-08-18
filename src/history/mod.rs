@@ -273,7 +273,7 @@ impl HistoryEntry {
         })
     }
 
-    pub fn format_extra_info(&self) -> String {
+    pub fn format_extra_info(&self, current_session: Option<&str>) -> String {
         let mut lines = Vec::new();
 
         if let Some(cwd) = self.cwd() {
@@ -307,10 +307,14 @@ impl HistoryEntry {
         }
         if let Some(pipe) = self.pipestatus().filter(|s| !s.trim().is_empty()) {
             lines.push(format!("Pipeline Status: {}", pipe));
-        } else {
-            lines.push("Pipeline Status: N/A".to_string());
         }
-        if let Some(session) = self.session() {
+        if let Some(current) = current_session {
+            if self.session() == Some(current) {
+                lines.push("Session: Current session".to_string());
+            } else {
+                lines.push("Session: Other session".to_string());
+            }
+        } else if let Some(session) = self.session() {
             lines.push(format!("Session: {}", session));
         }
         if let Some(id) = self.id() {
@@ -406,6 +410,10 @@ impl HistoryManager {
             last_submitted_command: None,
         }
     }
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     pub fn jsonl_path(&self) -> PathBuf {
         self.jsonl_history_path.clone()
     }
@@ -802,6 +810,8 @@ impl HistoryManager {
         if let Some((cmd_id, _start_time)) = self.last_submitted_command.take() {
             let path = self.ensure_jsonl_repopulated_if_needed();
             let end_ts = TimestampNanos::now();
+            // We don't bother storing non infomative pipestatus
+            let pipestatus = pipestatus.filter(|ps| *ps != exit_status.to_string());
             let event = HistoryJsonlEvent::End {
                 id: cmd_id,
                 timestamp: end_ts,
@@ -2015,15 +2025,68 @@ clear
         meta.hostname = Some("my-laptop".to_string());
         meta.duration_ns = Some(1500000000);
         meta.exit_status = Some(0);
-        meta.pipestatus = Some("0".to_string());
+        meta.pipestatus = None;
+        meta.session = Some("session-abc".to_string());
 
-        let extra_info = entry.format_extra_info();
-        assert!(extra_info.contains("Directory: /home/user/project"));
-        assert!(extra_info.contains("Host: my-laptop"));
-        assert!(extra_info.contains("Duration: 1.50s"));
-        assert!(extra_info.contains("Exit Code: 0"));
-        assert!(extra_info.contains("Pipeline Status: 0"));
-        assert!(extra_info.contains("ID: test-uuid-123"));
+        let extra_info_curr = entry.format_extra_info(Some("session-abc"));
+        assert!(extra_info_curr.contains("Directory: /home/user/project"));
+        assert!(extra_info_curr.contains("Host: my-laptop"));
+        assert!(extra_info_curr.contains("Duration: 1.50s"));
+        assert!(extra_info_curr.contains("Exit Code: 0"));
+        assert!(!extra_info_curr.contains("Pipeline Status:"));
+        assert!(extra_info_curr.contains("Session: Current session"));
+        assert!(extra_info_curr.contains("ID: test-uuid-123"));
+
+        let extra_info_other = entry.format_extra_info(Some("other-session"));
+        assert!(extra_info_other.contains("Session: Other session"));
+
+        let extra_info_raw = entry.format_extra_info(None);
+        assert!(extra_info_raw.contains("Session: session-abc"));
+    }
+
+    #[test]
+    fn test_pipestatus_omitted_when_same_as_exit_code() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("flyline_test_ps_{}.jsonl", uuid::Uuid::now_v7()));
+        let mut manager = HistoryManager::new_empty_with_path(Some(temp_file.clone()));
+
+        // 1. Single command where pipestatus equals exit code
+        let cmd1_id = manager.push_entry_and_jsonl_append("ls".to_string());
+        manager.set_last_submitted_command(cmd1_id, Instant::now());
+        manager.record_last_command_end(0, Some("0".to_string()));
+
+        let entry1 = manager.entries().last().unwrap();
+        assert_eq!(entry1.exit_status(), Some(0));
+        assert_eq!(entry1.pipestatus(), None);
+
+        let end_event1 = entry1.to_jsonl_end_event().unwrap();
+        if let HistoryJsonlEvent::End { pipestatus, .. } = &end_event1 {
+            assert_eq!(*pipestatus, None);
+        } else {
+            panic!("Expected HistoryJsonlEvent::End");
+        }
+        let serialized1 = serde_json::to_string(&end_event1).unwrap();
+        assert!(!serialized1.contains("\"ps\":"));
+
+        // 2. Multi-stage pipeline where pipestatus differs / is multi-command
+        let cmd2_id = manager.push_entry_and_jsonl_append("foo | bar".to_string());
+        manager.set_last_submitted_command(cmd2_id, Instant::now());
+        manager.record_last_command_end(0, Some("0|1".to_string()));
+
+        let entry2 = manager.entries().last().unwrap();
+        assert_eq!(entry2.exit_status(), Some(0));
+        assert_eq!(entry2.pipestatus(), Some("0|1"));
+
+        let end_event2 = entry2.to_jsonl_end_event().unwrap();
+        if let HistoryJsonlEvent::End { pipestatus, .. } = &end_event2 {
+            assert_eq!(*pipestatus, Some("0|1".to_string()));
+        } else {
+            panic!("Expected HistoryJsonlEvent::End");
+        }
+        let serialized2 = serde_json::to_string(&end_event2).unwrap();
+        assert!(serialized2.contains("\"ps\":\"0|1\""));
+
+        let _ = std::fs::remove_file(&temp_file);
     }
 
     #[test]
@@ -2041,7 +2104,7 @@ clear
         meta.exit_status = Some(0);
         meta.pipestatus = Some("0 32 0".to_string());
 
-        let extra_info = entry.format_extra_info();
+        let extra_info = entry.format_extra_info(None);
         assert!(extra_info.contains("Directory: /home/hal/projects/flyline"));
         assert!(extra_info.contains("Host: hal-itx-pc"));
         assert!(extra_info.contains("Time: 2026-07-30"));
