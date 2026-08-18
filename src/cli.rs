@@ -728,14 +728,15 @@ enum KeySubcommands {
     /// (each optionally prefixed with `!` to negate).  Use `always` for
     /// unconditional bindings.  Parentheses and `||` are not supported.
     ///
-    /// Available context variables: always, bufferIsEmpty, fuzzyHistorySearch,
-    ///   tabCompletionWaiting, tabCompletion, tabCompletionAvailable,
-    ///   tabCompletionOneResult, tabCompletionMultiColAvailable,
-    ///   tabCompletionNoFilteredResults, tabCompletionNoResults,
-    ///   agentModeWaiting, agentOutputSelection, agentModeError,
-    ///   inlineSuggestionAvailable, cursorAtEnd, cursorAtEndTrimmed,
-    ///   cursorAtStart, promptDirSelection, textSelected, multilineBuffer,
-    ///   bufferHasAgentModePrefix, editingBufferMode.
+    /// Available context variables: always, bufferIsEmpty, bufferIsTrimmedEmpty,
+    ///   fuzzyHistorySearch, tabCompletionWaiting, tabCompletion,
+    ///   tabCompletionAvailable, tabCompletionOneResult,
+    ///   tabCompletionMultiColAvailable, tabCompletionNoFilteredResults,
+    ///   tabCompletionNoResults, agentModeWaiting, agentOutputSelection,
+    ///   agentModeError, inlineSuggestionAvailable, cursorAtEnd,
+    ///   cursorAtEndTrimmed, cursorAtStart, promptDirSelection,
+    ///   textSelected, multilineBuffer, bufferHasAgentModePrefix,
+    ///   editingBufferMode.
     ///
     /// Examples:
     ///   flyline key bind Ctrl+Enter always=submitOrNewline

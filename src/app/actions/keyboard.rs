@@ -3937,15 +3937,16 @@ mod tests {
     #[test]
     fn test_context_expr_parse_new_vars() {
         let e = ContextExpr::try_from(
-            "bufferIsEmpty+tabCompletionEntrySelected+tabCompletionOneResult+tabCompletionNoFilteredResults+tabCompletionNoResults+multilineBuffer",
+            "bufferIsEmpty+bufferIsTrimmedEmpty+tabCompletionEntrySelected+tabCompletionOneResult+tabCompletionNoFilteredResults+tabCompletionNoResults+multilineBuffer",
         )
         .unwrap();
         assert!(e.literals[0].var == ContextVar::BufferIsEmpty);
-        assert!(e.literals[1].var == ContextVar::TabCompletionEntrySelected);
-        assert!(e.literals[2].var == ContextVar::TabCompletionOneResult);
-        assert!(e.literals[3].var == ContextVar::TabCompletionNoFilteredResults);
-        assert!(e.literals[4].var == ContextVar::TabCompletionNoResults);
-        assert!(e.literals[5].var == ContextVar::MultilineBuffer);
+        assert!(e.literals[1].var == ContextVar::BufferIsTrimmedEmpty);
+        assert!(e.literals[2].var == ContextVar::TabCompletionEntrySelected);
+        assert!(e.literals[3].var == ContextVar::TabCompletionOneResult);
+        assert!(e.literals[4].var == ContextVar::TabCompletionNoFilteredResults);
+        assert!(e.literals[5].var == ContextVar::TabCompletionNoResults);
+        assert!(e.literals[6].var == ContextVar::MultilineBuffer);
     }
 
     #[test]
@@ -4282,6 +4283,8 @@ pub(crate) enum ContextVar {
     Always,
     #[strum(message = "The command buffer is empty")]
     BufferIsEmpty,
+    #[strum(message = "The command buffer is empty or contains only whitespace")]
+    BufferIsTrimmedEmpty,
     #[strum(message = "Fuzzy history search overlay is active")]
     FuzzyHistorySearch,
     #[strum(message = "Fuzzy history search overlay for normal commands is active")]
@@ -4363,6 +4366,7 @@ impl ContextVar {
         match self {
             ContextVar::Always => true,
             ContextVar::BufferIsEmpty => app.buffer.buffer().is_empty(),
+            ContextVar::BufferIsTrimmedEmpty => app.buffer.buffer().trim().is_empty(),
             ContextVar::FuzzyHistorySearch => {
                 matches!(app.content_mode, ContentMode::FuzzyHistorySearch(_))
             }
