@@ -1,5 +1,6 @@
 {
   lib,
+  bashInteractive,
   rustPlatform,
   stdenv,
 }:
@@ -39,6 +40,15 @@ rustPlatform.buildRustPackage {
     "--skip=test_bash_5_0"
     "--skip=test_bash_5_3"
   ];
+
+  nativeCheckInputs = [ bashInteractive ];
+
+  postCheck = ''
+    library="$(find target -type f -name 'libflyline${stdenv.hostPlatform.extensions.sharedLibrary}' -print -quit)"
+    test -n "$library"
+    ${bashInteractive}/bin/bash --noprofile --norc -i -c \
+      'enable -f "$1" flyline' flyline-nix-check "$library"
+  '';
 
   meta = {
     description = "Bash plugin to replace readline for a modern line editing experience";
